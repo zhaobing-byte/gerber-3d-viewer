@@ -13,12 +13,8 @@ export default defineConfig({
         '**/*.rar',
         '**/*.tar',
         '**/*.gz',
-        // 模型库（7238 个 STEP）整树不监听：`import.meta.glob` 的索引只在 dev 启动/构建时
-        // 建立一次，而批量写入（CLI 铺库、或网页端导入整库压缩包）会让 Vite 为每个文件
-        // 逐条触发 glob 失效 → HMR/整页 reload 风暴，最终把 dev server 打死并在日志里留下
-        // `hmr update /src/App.tsx, /src/StepModelPicker.tsx, /src/PcbViewer.tsx (xN)`。
-        // 症状是页面再也拿不到稳定的模型索引，STEP 选择器没有分类导航。
-        // 代价：新增/删除模型不再自动刷新，需重启 `npm run dev` 生效（原本也要求重启）。
+        // 本机模型库由 Python API 动态读取，不参与 Vite 构建或监听。批量铺库时忽略整树，
+        // 避免数千个 STEP 文件触发 HMR 文件事件；页面可通过模型目录 API 立即重新读取清单。
         '**/footprint/3dmodels/**',
       ],
     },

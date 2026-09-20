@@ -4,11 +4,11 @@ export interface FootprintImportResult {
   kind: 'model'
   category: string
   filename: string
-  /** 与 `import.meta.glob` 索引键一致的根相对路径，可直接写入模型绑定。 */
+  /** 稳定的模型库根相对路径，可直接写入模型绑定。 */
   source_path: string
   bytes: number
   overwritten: boolean
-  /** 模型索引在开发服务器启动时生成，新文件需重启或重新构建才会进入正式分类。 */
+  /** 兼容旧接口字段；动态模型目录始终返回 `false`。 */
   requires_restart: boolean
 }
 
@@ -50,6 +50,7 @@ export interface FootprintArchiveResult {
   categories: FootprintArchiveCategory[]
   models: FootprintArchiveModel[]
   elapsed_ms: number
+  /** 兼容旧接口字段；动态模型目录始终返回 `false`。 */
   requires_restart: boolean
 }
 

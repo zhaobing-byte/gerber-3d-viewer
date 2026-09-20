@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-09-19T16:47:04+00:00",
+  "updated_at": "2026-09-20T02:50:17+00:00",
   "bindings": {
     "sku:21010058": "/footprint/3dmodels/芯片封装_QFP.3dshapes/LQFP-64_10x10mm_P0.5mm.step",
     "sku:21010070": "/footprint/3dmodels/芯片封装_QFP.3dshapes/LQFP-64_10x10mm_P0.5mm.step",
@@ -9,8 +9,11 @@
     "sku:22050005": "/footprint/3dmodels/电阻_贴片.3dshapes/R_1206_3216Metric.step",
     "sku:22060004": "/footprint/3dmodels/电阻_贴片.3dshapes/R_2512_6332Metric.step",
     "sku:23060005": "/footprint/3dmodels/电容_贴片.3dshapes/C_Elec_5x5.4.step",
+    "sku:24010114": "/footprint/3dmodels/电感_贴片.3dshapes/L_Changjiang_FXL0530.step",
+    "sku:26010019": "/footprint/3dmodels/晶体与谐振器.3dshapes/Crystal_SMD_3225-4Pin_3.2x2.5mm.step",
     "sku:26010021": "/footprint/3dmodels/晶体与谐振器.3dshapes/Crystal_SMD_3225-4Pin_3.2x2.5mm.step",
     "sku:27010012": "/footprint/3dmodels/连接器_USB.3dshapes/USB_C_Receptacle_GCT_USB4105-xx-A_16P_TopMnt_Horizontal.step",
+    "sku:28010040": "/footprint/3dmodels/按键开关_贴片.3dshapes/SW_Push_1P1T_NO_E-Switch_TL3301NxxxxxG.step",
     "sku:29010001": "/footprint/3dmodels/蜂鸣器.3dshapes/MagneticBuzzer_Kobitone_254-EMB84Q-RO.step"
   }
 }

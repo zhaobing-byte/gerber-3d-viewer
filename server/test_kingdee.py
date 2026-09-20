@@ -13,10 +13,13 @@ from server.kingdee_server import (
     footprint_category_dir,
     import_size_limit,
     is_package_filename,
+    list_footprint_models,
     merge_config,
     model_filename,
+    model_source_path,
     public_config,
     read_config,
+    resolve_model_source_path,
     store_footprint_archive,
     store_footprint_model,
     write_config,
@@ -99,12 +102,12 @@ class FootprintImportTests(unittest.TestCase):
         self.assertEqual(model_filename("a.stp"), "a.stp")
         self.assertEqual(model_filename("a.glb"), "a.glb")
 
-    def test_store_reports_source_path_matching_vite_glob_key(self):
+    def test_store_reports_stable_model_source_path(self):
         result = store_footprint_model(self.category, "C_0603_L.step", b"solid", self.root)
         self.assertEqual(result["source_path"], f"/footprint/3dmodels/{self.category}/C_0603_L.step")
         self.assertEqual(result["category"], self.category)
         self.assertFalse(result["overwritten"])
-        self.assertTrue(result["requires_restart"])
+        self.assertFalse(result["requires_restart"])
         self.assertEqual((self.root / self.category / "C_0603_L.step").read_bytes(), b"solid")
 
     def test_store_overwrites_existing_model_and_leaves_no_temp_file(self):
@@ -120,6 +123,50 @@ class FootprintImportTests(unittest.TestCase):
             store_footprint_model(self.category, "a.step", b"", self.root)
         with self.assertRaises(ValueError):
             store_footprint_model(self.category, "a.step", b"x" * (MAX_IMPORT_BYTES + 1), self.root)
+
+
+class FootprintCatalogTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name) / "3dmodels"
+        self.category = "电容_贴片.3dshapes"
+        self.connector_category = "连接器_USB.3dshapes"
+        (self.root / self.category).mkdir(parents=True)
+        (self.root / self.connector_category).mkdir()
+        (self.root / self.category / "C_0603_1608Metric.step").write_bytes(b"step")
+        (self.root / self.category / "C_0603_1608Metric.glb").write_bytes(b"glb")
+        (self.root / self.category / "说明.txt").write_text("ignore", encoding="utf-8")
+        (self.root / self.connector_category / "USB-C.stp").write_bytes(b"stp")
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def test_catalog_lists_supported_models_without_reading_other_files(self):
+        rows = list_footprint_models(self.root)
+        self.assertEqual([row["source_path"] for row in rows], [
+            "/footprint/3dmodels/电容_贴片.3dshapes/C_0603_1608Metric.glb",
+            "/footprint/3dmodels/电容_贴片.3dshapes/C_0603_1608Metric.step",
+            "/footprint/3dmodels/连接器_USB.3dshapes/USB-C.stp",
+        ])
+        self.assertEqual(rows[1]["name"], "C_0603_1608Metric")
+        self.assertEqual(rows[1]["extension"], ".step")
+        self.assertEqual(rows[1]["bytes"], 4)
+        self.assertIn("/api/footprint/model?path=", rows[1]["url"])
+
+    def test_resolve_model_path_accepts_catalog_path_and_rejects_escape(self):
+        source_path = model_source_path(self.category, "C_0603_1608Metric.step")
+        self.assertEqual(
+            resolve_model_source_path(source_path, self.root),
+            self.root / self.category / "C_0603_1608Metric.step",
+        )
+        for invalid in (
+            "/footprint/3dmodels/../server/config.json",
+            "/footprint/3dmodels/电容_贴片.3dshapes/../C_0603_1608Metric.step",
+            "/another-root/电容_贴片.3dshapes/C_0603_1608Metric.step",
+        ):
+            with self.subTest(source_path=invalid):
+                with self.assertRaises(ValueError):
+                    resolve_model_source_path(invalid, self.root)
 
 
 class FootprintArchiveTests(unittest.TestCase):
@@ -179,7 +226,7 @@ class FootprintArchiveTests(unittest.TestCase):
             [entry["created_category"] for entry in result["models"] if entry["category"] == "新建_实验分类.3dshapes"],
             [True],
         )
-        self.assertTrue(result["requires_restart"])
+        self.assertFalse(result["requires_restart"])
 
     def test_archive_reuses_one_new_category_for_all_its_entries(self):
         data = self.build_archive({

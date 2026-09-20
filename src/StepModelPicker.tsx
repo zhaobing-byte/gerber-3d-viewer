@@ -37,6 +37,7 @@ interface StepModelPickerProps {
   item: ComponentLibraryItem
   models: FootprintModel[]
   initialModelPath?: string | null
+  onModelsImported?: () => Promise<void>
   onBind: (model: FootprintModel) => void
   onClose: () => void
   onUnbind?: () => void
@@ -74,6 +75,7 @@ export default function StepModelPicker({
   item,
   models,
   initialModelPath,
+  onModelsImported,
   onBind,
   onClose,
   onUnbind,
@@ -137,6 +139,11 @@ export default function StepModelPicker({
     sessionUrlsRef.current = []
   }, [])
 
+  useEffect(() => {
+    if (selectedPath && sortedModels.some((model) => model.sourcePath === selectedPath)) return
+    setSelectedPath(sortedModels[0]?.sourcePath ?? '')
+  }, [selectedPath, sortedModels])
+
   const chooseCategory = (category: string) => {
     setActiveCategory(category)
     const nextModels = category === allModelsCategory
@@ -166,6 +173,15 @@ export default function StepModelPicker({
   const openImportPicker = () => {
     resetImportPanel()
     fileInputRef.current?.click()
+  }
+
+  const refreshModelsAfterImport = async () => {
+    if (!onModelsImported) return
+    try {
+      await onModelsImported()
+    } catch {
+      setImportError('模型已写入本机库，但刷新目录失败；关闭选择器后重新打开即可读取。')
+    }
   }
 
   const handleImportInput = (event: ChangeEvent<HTMLInputElement>) => {
@@ -202,10 +218,9 @@ export default function StepModelPicker({
     setImportError('')
     try {
       if (isFootprintArchive(importFile)) {
-        // 压缩包内可能有上百个模型，无法在会话内逐个建预览 URL，因此只回读落盘报告，
-        // 等重启开发服务器后由 `import.meta.glob` 建索引再浏览与绑定。
         const archive = await importFootprintArchive(importTarget, importFile)
         setImportArchiveResult(archive)
+        await refreshModelsAfterImport()
         setImportState('idle')
         return
       }
@@ -229,6 +244,7 @@ export default function StepModelPicker({
       setActiveCategory(category.key)
       setSelectedPath(sessionModel.sourcePath)
       setImportResult(result)
+      await refreshModelsAfterImport()
       setImportState('idle')
     } catch (error) {
       setImportState('idle')
@@ -442,7 +458,7 @@ export default function StepModelPicker({
                       已写入 <code>{importResult.source_path}</code>
                       {importResult.overwritten ? '（覆盖了同名文件）' : ''}。
                       已加入本次会话的「{footprintCategoryOf(importResult.source_path).label}」分类，可直接预览与绑定；
-                      重启 <code>npm run dev</code> 或重新构建后，该模型会进入正式分类与 3D 视图。
+                      模型目录已刷新，可立即用于物料绑定和 PCB 3D 展示。
                     </span>
                   </p>
                 ) : importArchiveResult ? (
@@ -499,7 +515,7 @@ export default function StepModelPicker({
                     <p className="step-picker-import-hint">
                       <AlertTriangle size={14} />
                       <span>
-                        重启 <code>npm run dev</code> 或重新构建后，这批模型会进入正式分类与 3D 视图。
+                        模型目录已刷新，这批模型可立即在分类中浏览、绑定并用于 PCB 3D 展示。
                       </span>
                     </p>
                   </div>

@@ -71,10 +71,8 @@ import {
   type SourceFile,
 } from './gerber'
 import {
-  footprintModels,
-  footprintSources,
-  matchBomFootprintSources,
-  matchComponentLibraryFootprint,
+  createFootprintModelMatcher,
+  fetchFootprintModels,
   type FootprintModel,
 } from './footprint-library'
 import {
@@ -173,9 +171,6 @@ const bomRowNudgeControls: readonly BomNudgeControl[] = [
   { axis: 'offsetZ', direction: 1, label: '高度+', hint: '沿元件面法向抬高', Icon: ArrowUpFromLine },
   { axis: 'offsetZ', direction: -1, label: '高度-', hint: '沿元件面法向降低', Icon: ArrowDownFromLine },
 ]
-const footprintModelByPath = new Map(footprintModels.map((model) => [model.sourcePath, model]))
-const stepFootprintModels = footprintModels.filter((model) => Boolean(model.stepUrl))
-
 const bomTableColumns: BomColumnDefinition[] = [
   { key: 'check', label: '确认状态', className: 'bom-col-check', headerClassName: 'bom-check-cell', defaultWidth: 36, minWidth: 32, maxWidth: 72 },
   { key: 'sku', label: '编码', className: 'bom-col-sku', defaultWidth: 82, minWidth: 56, maxWidth: 420 },
@@ -314,6 +309,9 @@ function App() {
   const [kingdeeLastSync, setKingdeeLastSync] = useState<Date | null>(null)
   const [componentLibraryQuery, setComponentLibraryQuery] = useState('')
   const [componentLibraryFieldFilter, setComponentLibraryFieldFilter] = useState<string | null>(null)
+  const [footprintModels, setFootprintModels] = useState<FootprintModel[]>([])
+  const [footprintModelsLoading, setFootprintModelsLoading] = useState(true)
+  const [footprintModelsError, setFootprintModelsError] = useState<string | null>(null)
   const [materialModelBindings, setMaterialModelBindings] = useState<MaterialModelBindings>(
     () => loadStringMap(materialModelBindingsStorageKey),
   )
@@ -405,6 +403,23 @@ function App() {
     setSelectedLibraryModelPath(undefined)
   }
 
+  const refreshFootprintModels = async () => {
+    setFootprintModelsLoading(true)
+    try {
+      const models = await fetchFootprintModels()
+      setFootprintModels(models)
+      setFootprintModelsError(null)
+    } catch (catalogError) {
+      setFootprintModels([])
+      setFootprintModelsError(
+        catalogError instanceof Error ? catalogError.message : '无法读取本机 STEP 3D 封装库',
+      )
+      throw catalogError
+    } finally {
+      setFootprintModelsLoading(false)
+    }
+  }
+
   const loadSources = async (sources: SourceFile[]) => {
     setLoading({ active: true, progress: 0, file: sources[0]?.name ?? '' })
     setError(null)
@@ -428,6 +443,10 @@ function App() {
 
   useEffect(() => {
     void loadSources(createSampleSources())
+  }, [])
+
+  useEffect(() => {
+    void refreshFootprintModels().catch(() => undefined)
   }, [])
 
   useEffect(() => {
@@ -651,9 +670,13 @@ function App() {
     () => selectedBomItem?.designators ?? [],
     [selectedBomItem],
   )
-  const footprintSourceMatches = useMemo(
-    () => matchBomFootprintSources(bomData?.items ?? []),
-    [bomData],
+  const footprintModelByPath = useMemo(
+    () => new Map(footprintModels.map((model) => [model.sourcePath, model])),
+    [footprintModels],
+  )
+  const footprintMatcher = useMemo(
+    () => createFootprintModelMatcher(footprintModels),
+    [footprintModels],
   )
   const pcbBomItems = useMemo(
     () => (bomData?.items ?? []).filter((item) => bomLibraryMatches.has(item.id)),
@@ -701,13 +724,13 @@ function App() {
       .sort((left, right) => right.count - left.count || left.field.localeCompare(right.field, 'zh-CN'))
   }, [componentLibraryData])
   const componentLibraryFootprintMatches = useMemo(() => {
-    const matches = new Map<string, NonNullable<ReturnType<typeof matchComponentLibraryFootprint>>>()
+    const matches = new Map<string, NonNullable<ReturnType<typeof footprintMatcher.matchComponentLibraryFootprint>>>()
     componentLibraryData?.items.forEach((item) => {
-      const match = matchComponentLibraryFootprint(item)
+      const match = footprintMatcher.matchComponentLibraryFootprint(item)
       if (match) matches.set(item.id, match)
     })
     return matches
-  }, [componentLibraryData])
+  }, [componentLibraryData, footprintMatcher])
   const manualLibraryModels = useMemo(() => {
     const bindings = new Map<string, FootprintModel>()
     componentLibraryData?.items.forEach((item) => {
@@ -716,7 +739,7 @@ function App() {
       if (model) bindings.set(item.id, model)
     })
     return bindings
-  }, [componentLibraryData, materialModelBindings])
+  }, [componentLibraryData, footprintModelByPath, materialModelBindings])
   const manualModelTargetItem = useMemo(
     () => componentLibraryData?.items.find((item) => item.id === manualModelTargetId) ?? null,
     [componentLibraryData, manualModelTargetId],
@@ -1569,9 +1592,9 @@ function App() {
                 </span>
                 <span
                   className={bomLibraryMatches.size === (sourceBomData?.items.length ?? 0) ? 'aligned' : 'partial'}
-                  title={`数据库按规格与封装核对；footprint 中有 ${footprintSources.length} 个 STEP 映射`}
+                  title={`数据库按规格与封装核对；本机 STEP 3D 封装库已加载 ${footprintModels.length} 个模型`}
                 >
-                  数据库 {bomLibraryMatches.size}/{sourceBomData?.items.length ?? 0} · STEP {footprintSourceMatches.size}/{bomData.items.length}
+                  数据库 {bomLibraryMatches.size}/{sourceBomData?.items.length ?? 0} · STEP {bomFootprintModelOverrides.size}/{bomData.items.length}
                 </span>
               </div>
               <label className="bom-search">
@@ -2058,6 +2081,27 @@ function App() {
                 </div>
               )}
 
+              {footprintModelsLoading && (
+                <div className="library-model-catalog-status" role="status">
+                  <LoaderCircle className="spin" size={14} />
+                  <span>正在读取本机 STEP 3D 封装库…</span>
+                </div>
+              )}
+              {footprintModelsError && (
+                <div className="library-model-catalog-status error" role="alert">
+                  <AlertTriangle size={14} />
+                  <span>{footprintModelsError}</span>
+                  <button
+                    type="button"
+                    onClick={() => void refreshFootprintModels().catch(() => undefined)}
+                    title="重新读取模型库"
+                    aria-label="重新读取模型库"
+                  >
+                    <RefreshCw size={13} />
+                  </button>
+                </div>
+              )}
+
               <FootprintModelBrowser
                 models={footprintModels}
                 selectedModelPath={selectedLibraryModelPath}
@@ -2220,7 +2264,8 @@ function App() {
                 ?? componentLibraryFootprintMatches.get(manualModelTargetItem.id)?.model.sourcePath
               }
               item={manualModelTargetItem}
-              models={stepFootprintModels}
+              models={footprintModels}
+              onModelsImported={refreshFootprintModels}
               onBind={(model) => bindManualModel(manualModelTargetItem, model)}
               onClose={() => setManualModelTargetId(null)}
               onUnbind={manualLibraryModels.has(manualModelTargetItem.id)

@@ -109,16 +109,15 @@ npm run preview
 
 ## 3D 封装库
 
-项目内的 [`footprint`](./footprint) 目录是版本管理中的模型源库，按 `passive`、`semiconductor`、`connector`、`electromechanical`、`opto` 和 `mechanical` 分类。详细命名、坐标原点和方向规范见 [`footprint/README.md`](./footprint/README.md)。
+完整 KiCad 模型库位于 [`footprint/3dmodels`](./footprint/3dmodels)，目录按中文 `.3dshapes` 分类保存。它是本机模型源，不进入 Git；应用通过本机 Python 服务按需读取目录清单，并仅在用户选中模型时传输对应的 STEP/STP/GLB 文件，因此不会把完整模型库打进前端构建产物。详细命名、坐标原点、分类和恢复方法见 [`footprint/README.md`](./footprint/README.md)。
 
-网页模型索引以 `.glb` 文件为入口。推荐同时保留同名 STEP/STP 和 GLB：
+模型绑定使用稳定的根相对路径，例如：
 
 ```text
-footprint/passive/resistor/R_0603_L.step
-footprint/passive/resistor/R_0603_L.glb
+/footprint/3dmodels/电容_贴片.3dshapes/C_0603_1608Metric.step
 ```
 
-当同名 STEP 与 GLB 同时存在时，程序优先解析 STEP，以保留模型中的原始颜色；GLB 用于建立构建时模型索引。新增模型后需要重启开发服务器或重新构建。
+同名 STEP/STP 和 GLB 同时存在时，程序优先使用 STEP/STP，以保留模型原始颜色。通过选择窗口导入模型后，目录清单会立即刷新；不需要重新构建前端。
 
 ### 压缩包批量导入
 
@@ -131,7 +130,7 @@ footprint/passive/resistor/R_0603_L.glb
 - 同名文件覆盖，条目路径不参与拼接，结构上不存在 zip-slip。
 - 自动新建的分类不会写进 `src/footprint-categories.ts`，未登记的目录会回落到「其他」大类；需要正式归入六大类时在 `src/footprint-categories.ts` 里补登记。
 
-限额：单个模型 80 MB，压缩包整包 2 GB，解压后总量 8 GB，最多 40000 个条目。导入完成后同样需要重启开发服务器或重新构建，模型才会进入正式分类与 3D 视图。
+限额：单个模型 80 MB，压缩包整包 2 GB，解压后总量 8 GB，最多 40000 个条目。导入完成后会刷新模型清单，模型可立刻在选择窗口和 3D 视图中使用。
 
 从本机 KiCad 10 模型库同步当前清单中的标准模型：
 
@@ -196,11 +195,11 @@ git add src README.md
 git commit -m "feat: describe the change"
 ```
 
-`node_modules`、`dist`、本地环境变量和日志文件不会进入版本库。`footprint` 中的 STEP/GLB 模型会随源码提交，修改模型库前请注意仓库体积。
+`node_modules`、`dist`、本地环境变量、日志文件和 `footprint/3dmodels` 本机模型库不会进入版本库。模型绑定记录保存在 `footprint/model-bindings.json`，可随源码提交。
 
 ## 当前限制
 
 - 3D 钻孔目前使用深色几何模拟，未对板体执行布尔减孔。
 - 复杂负片、特殊光圈宏和刚挠结合板仍需更多生产文件验证。
-- 已同步的物料数据和手动 3D 模型绑定目前仅保存在当前浏览器会话中；金蝶连接配置会保存在本机，刷新后可直接重新同步。
+- 已同步的物料数据保存在当前浏览器会话中；手动 3D 模型绑定保存到 `footprint/model-bindings.json`，金蝶连接配置保存于本机，刷新后可直接重新同步。
 - 模型贴装原点、单位或 0° 方向不符合规范时，仍需修正源模型。

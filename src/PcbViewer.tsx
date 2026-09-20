@@ -9,7 +9,7 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
 import { renderSVG, renderThree } from 'web-gerber'
 import type { PathSegment, SvgElement } from 'web-gerber'
 import type { BomItem } from './assembly-data'
-import { matchFootprintModel, type FootprintModel } from './footprint-library'
+import type { FootprintModel } from './footprint-library'
 import type { ParsedBoard, ParsedLayer } from './gerber'
 import type { PlacementAlignment } from './placement-alignment'
 import { parseStepArrayBuffer } from './step-model'
@@ -303,7 +303,9 @@ function createPlacementObject(
     const designator = placement.designator.trim().toUpperCase()
     const item = itemByDesignator.get(designator)
     if (!item) return
-    const model = footprintModelOverrides.get(item.id) ?? matchFootprintModel(item)
+    // App 只把已完成数据库核对、且已自动或人工绑定模型的 BOM 行传进来。
+    // 这里不再按裸封装名兜底，避免未经金蝶确认的元件出现在 PCB 上。
+    const model = footprintModelOverrides.get(item.id)
     if (!model) return
     const isSelected = selected.has(designator)
     const side: SurfaceSide = placement.side === 'bottom' ? 'bottom' : 'top'

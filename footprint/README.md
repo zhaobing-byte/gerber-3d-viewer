@@ -82,7 +82,7 @@
 
 `ICO1` 是 Logo，`TEST 0.8` 是测试点，通常不需要实体 3D 模型。
 
-添加模型后需重启开发服务器或重新构建，使 Vite 重新生成模型索引。
+模型目录由本机服务动态扫描。通过页面导入模型后会自动刷新选择器；手工复制模型后刷新页面或重新打开选择窗口即可读取新文件。
 
 ## 本地完整模型库
 
@@ -144,7 +144,7 @@ footprint/3dmodels/<中文分类>.3dshapes/<模型>.step
 - 手工解压时不要把压缩包里的包装目录一起拷进 `footprint/3dmodels/`（正确结果是 `3dmodels/<分类>.3dshapes/…`，不是 `3dmodels/<包装目录>/<分类>.3dshapes/…`）。
 - 网页端导入（`POST /api/footprint/import`）按包内**最近的** `<分类>.3dshapes/` 归一，不会产生包装层；命中库内已有分类则直接归位，库内没有的分类名会自动新建（新目录未写入 `src/footprint-categories.ts`，会先落在「其他」大类）。
 - 库为空时，面板会给出「按包内分类自动归位」档位（`category=__auto__`，前后端常量 `AUTO_CATEGORY_KEY` / `footprintAutoCategory`）：不指定默认分类，完全按包内结构重建分类目录，没有 `<分类>.3dshapes/` 层级的条目被跳过。因此网页端也能把整库从零恢复，不需要先留一个分类目录；单个模型文件仍必须有已存在的分类目录。
-- 新增分类目录后，除写入 `src/footprint-categories.ts` 与 CSV 外，还需重启 `npm run dev`（模型索引由 `import.meta.glob` 在启动时生成）。
+- 新增分类目录后，模型服务会自动列出该目录；同时在 `src/footprint-categories.ts` 与 CSV 中登记，才能让它归入六个业务大类并保留原始英文目录映射。未登记的目录会先显示在「其他」。
 
 ## 从 KiCad 10 同步
 
@@ -182,8 +182,7 @@ npm run models:import -- "C:\path\to\3dmodels.zip" --check-folder-map footprint/
 npm run models:import -- "C:\path\to\3dmodels.zip" --write
 ```
 
-铺库前后请**停掉 `npm run dev`**：解压数千个文件会触发 Vite 的文件监听风暴。铺完必须重启开发服务器（或重新构建），
-因为模型索引由 `import.meta.glob` 在启动时生成。
+完整模型库由本机模型服务动态读取，Vite 不监听 `footprint/3dmodels`。铺库期间可保持开发服务器运行；铺完刷新页面或重新打开 STEP 选择窗口即可读取新模型。
 
 ## 转换为网页模型
 

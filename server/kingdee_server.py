@@ -44,6 +44,9 @@ STORE_ROUTES: dict[str, tuple[Path, str]] = {
 ALLOWED_MODEL_SUFFIXES = frozenset({".step", ".stp", ".glb"})
 ALLOWED_PACKAGE_SUFFIXES = frozenset({".zip"})
 CATEGORY_SUFFIX = ".3dshapes"
+MODEL_CATALOG_ROUTE = "/api/footprint/models"
+MODEL_FILE_ROUTE = "/api/footprint/model"
+MODEL_SOURCE_PREFIX = "/footprint/3dmodels/"
 # 前端导入面板的「按包内分类自动归位」档位：不指定默认分类，完全按包内
 # `<分类>.3dshapes/` 归位。库为空（一个分类目录都没有）时靠它完成从零恢复。
 # 与前端 `footprintAutoCategory` 必须一致，改动要同步。
@@ -158,6 +161,62 @@ def model_filename(filename: str) -> str:
     return name
 
 
+def model_source_path(category: str, filename: str) -> str:
+    """返回前端绑定记录使用的稳定模型路径。"""
+    return f"{MODEL_SOURCE_PREFIX}{category}/{filename}"
+
+
+def resolve_model_source_path(source_path: str, root: Path = FOOTPRINT_MODEL_ROOT) -> Path:
+    """把前端模型路径安全地解析为本机模型文件。
+
+    模型库契约固定为 `<分类>.3dshapes/<文件>` 两级。路径校验在读取前完成，
+    因此前端保存的绑定不能越出 `footprint/3dmodels`。
+    """
+    raw = source_path.strip().replace("\\", "/")
+    if not raw.startswith(MODEL_SOURCE_PREFIX):
+        raise ValueError("模型路径不属于本地 3D 封装库")
+    relative = raw[len(MODEL_SOURCE_PREFIX):]
+    parts = [part for part in relative.split("/") if part]
+    if len(parts) != 2 or any(part in {".", ".."} for part in parts):
+        raise ValueError("模型路径无效")
+    category, filename = parts
+    directory = footprint_category_dir(category, root)
+    candidate = (directory / model_filename(filename)).resolve()
+    try:
+        candidate.relative_to(root.resolve())
+    except ValueError as exc:
+        raise ValueError("模型路径无效") from exc
+    if not candidate.is_file():
+        raise FileNotFoundError("模型文件不存在")
+    return candidate
+
+
+def model_file_url(source_path: str) -> str:
+    """返回浏览器按需读取模型的本机 API 地址。"""
+    return f"{MODEL_FILE_ROUTE}?{urllib.parse.urlencode({'path': source_path})}"
+
+
+def list_footprint_models(root: Path = FOOTPRINT_MODEL_ROOT) -> list[dict[str, Any]]:
+    """读取模型目录的轻量清单，不读取 STEP/GLB 文件内容。"""
+    if not root.is_dir():
+        return []
+    rows: list[dict[str, Any]] = []
+    for category in sorted((entry for entry in root.iterdir() if entry.is_dir()), key=lambda entry: entry.name.casefold()):
+        for model in sorted((entry for entry in category.iterdir() if entry.is_file()), key=lambda entry: entry.name.casefold()):
+            suffix = model.suffix.lower()
+            if suffix not in ALLOWED_MODEL_SUFFIXES:
+                continue
+            source_path = model_source_path(category.name, model.name)
+            rows.append({
+                "source_path": source_path,
+                "name": model.stem,
+                "extension": suffix,
+                "bytes": model.stat().st_size,
+                "url": model_file_url(source_path),
+            })
+    return rows
+
+
 def store_footprint_model(
     category: str,
     filename: str,
@@ -187,10 +246,10 @@ def store_footprint_model(
         "kind": "model",
         "category": directory.name,
         "filename": name,
-        "source_path": f"/footprint/3dmodels/{directory.name}/{name}",
+        "source_path": model_source_path(directory.name, name),
         "bytes": len(data),
         "overwritten": overwritten,
-        "requires_restart": True,
+        "requires_restart": False,
     }
 
 
@@ -291,7 +350,7 @@ def store_footprint_archive(
     - `category` 为 `AUTO_CATEGORY_KEY` 时不指定默认分类，完全按包内分类归位，
       用于库为空时从零恢复；此时没有 `.3dshapes` 层级的条目被跳过并计入报告。
     - 深层子目录会被拍平，只保留文件名：库契约是 `<分类>.3dshapes/<模型>` 两级，
-      而 `import.meta.glob('/footprint/**/*.step')` 也按该层级建索引。
+      便于本机模型目录按需扫描和安全地提供单个模型文件。
     - 非模型条目、系统垃圾与本库不接受的扩展名会被跳过并记入报告，不中断整包。
     - 落盘始终使用校验后的分类目录名 + 文件名，条目路径不参与拼接，从结构上排除 zip-slip。
     """
@@ -383,7 +442,7 @@ def store_footprint_archive(
                     models.append({
                         "category": target_category,
                         "filename": name,
-                        "source_path": f"/footprint/3dmodels/{target_category}/{name}",
+                        "source_path": model_source_path(target_category, name),
                         "bytes": info.file_size,
                         "overwritten": existed,
                         "created_category": is_new,
@@ -416,7 +475,7 @@ def store_footprint_archive(
             for name, count in sorted(per_category.items(), key=lambda item: (-item[1], item[0]))
         ],
         "models": models,
-        "requires_restart": True,
+        "requires_restart": False,
         "elapsed_ms": round((time.perf_counter() - started) * 1000),
     }
 
@@ -582,9 +641,30 @@ class FabViewHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _serve_footprint_model(self, source_path: str) -> None:
+        """按需发送单个模型，避免把完整模型库打进前端构建产物。"""
+        path = resolve_model_source_path(source_path)
+        content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(path.stat().st_size))
+        # 同一路径的模型可以被用户替换，不能让浏览器保留旧实体。
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        with path.open("rb") as stream:
+            shutil.copyfileobj(stream, self.wfile, 1024 * 1024)
+
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
         try:
+            if parsed.path == MODEL_CATALOG_ROUTE:
+                self._send_json({"models": list_footprint_models()})
+                return
+            if parsed.path == MODEL_FILE_ROUTE:
+                source_path = urllib.parse.parse_qs(parsed.query).get("path", [""])[0]
+                self._serve_footprint_model(source_path)
+                return
             if parsed.path in STORE_ROUTES:
                 path, field = STORE_ROUTES[parsed.path]
                 self._read_store(path, field)
@@ -615,6 +695,8 @@ class FabViewHandler(BaseHTTPRequestHandler):
             self._serve_static(parsed.path)
         except (ValueError, KingdeeAPIError) as exc:
             self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+        except FileNotFoundError as exc:
+            self._send_json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
 
     def _copy_body(self, sink: Any, length: int) -> None:
         """按块把请求体写入文件，长度不足时报错。"""

@@ -20,6 +20,7 @@ import {
   CloudDownload,
   Cuboid,
   Database,
+  Download,
   FileArchive,
   FileSpreadsheet,
   FlipVertical2,
@@ -83,7 +84,6 @@ import {
   type BomLibraryMatch,
 } from './component-library-matching'
 import { alignPlacements } from './placement-alignment'
-import { createSampleSources } from './sample-board'
 import { syncKingdeeComponentLibrary } from './kingdee-api'
 
 const colorOptions = [
@@ -183,6 +183,58 @@ const bomTableColumns: BomColumnDefinition[] = [
   { key: 'actions', label: '操作', className: 'bom-col-actions', headerClassName: 'bom-actions-heading', defaultWidth: 154, minWidth: 140, maxWidth: 260 },
 ]
 
+const productionBomExportHeaders = ['序号', '编码', '物料名称', '规格', '名称', '封装', '位号', '用量', '数量', '备注']
+
+const productionBomThinBorder = {
+  top: { style: 'thin', color: { rgb: 'FF000000' } },
+  right: { style: 'thin', color: { rgb: 'FF000000' } },
+  bottom: { style: 'thin', color: { rgb: 'FF000000' } },
+  left: { style: 'thin', color: { rgb: 'FF000000' } },
+}
+
+const productionBomInfoStyle = {
+  font: { name: '宋体', sz: 9, color: { rgb: 'FF000000' } },
+  alignment: { horizontal: 'center', vertical: 'center', wrapText: true },
+  border: productionBomThinBorder,
+}
+
+const productionBomHeaderStyle = {
+  ...productionBomInfoStyle,
+  fill: { patternType: 'solid', fgColor: { rgb: 'FFC0C0C0' } },
+}
+
+const productionBomDataStyle = {
+  font: { name: '等线', sz: 12, color: { rgb: 'FF000000' } },
+  alignment: { horizontal: 'center', vertical: 'center', wrapText: true },
+  border: productionBomThinBorder,
+}
+
+const productionBomNumberStyle = {
+  ...productionBomDataStyle,
+  numFmt: '0',
+}
+
+type ProductionBomSavePickerOptions = {
+  suggestedName: string
+  types: Array<{
+    description: string
+    accept: Record<string, string[]>
+  }>
+}
+
+type ProductionBomSaveFileHandle = {
+  createWritable: () => Promise<{
+    write: (data: Blob) => Promise<void>
+    close: () => Promise<void>
+  }>
+}
+
+type ProductionBomSaveWindow = Window & {
+  showSaveFilePicker?: (
+    options: ProductionBomSavePickerOptions,
+  ) => Promise<ProductionBomSaveFileHandle>
+}
+
 function defaultBomColumnWidths(): Record<BomColumnKey, number> {
   return Object.fromEntries(
     bomTableColumns.map((column) => [column.key, column.defaultWidth]),
@@ -208,6 +260,32 @@ function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}
+
+function productionBomFileName(file: File | null): string {
+  const sourceName = file?.name.replace(/\.[^.]+$/, '') ?? ''
+  const safeName = sourceName.replace(/[\\/:*?"<>|]+/g, '_').trim()
+  return `${safeName || '生产BOM'}-生产BOM.xlsx`
+}
+
+function requestProductionBomSaveHandle(fileName: string): Promise<ProductionBomSaveFileHandle> | null {
+  const picker = (window as ProductionBomSaveWindow).showSaveFilePicker
+  if (!picker) return null
+  return picker.call(window, {
+    suggestedName: fileName,
+    types: [
+      {
+        description: 'Excel 工作簿',
+        accept: {
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+        },
+      },
+    ],
+  })
+}
+
+function isSavePickerCancelled(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError'
 }
 
 function shortDesignators(designators: string[]): string {
@@ -292,7 +370,7 @@ function App() {
   const bomTableWrapRef = useRef<HTMLDivElement | null>(null)
   const placementInputRef = useRef<HTMLInputElement>(null)
   const [board, setBoard] = useState<ParsedBoard | null>(null)
-  const [gerberImportName, setGerberImportName] = useState('内置示例')
+  const [gerberImportName, setGerberImportName] = useState('')
   const [bomFile, setBomFile] = useState<File | null>(null)
   const [placementFile, setPlacementFile] = useState<File | null>(null)
   const [bomData, setBomData] = useState<ParsedBomFile | null>(null)
@@ -348,7 +426,8 @@ function App() {
     startWidth: number
   } | null>(null)
   const [auxiliaryLoading, setAuxiliaryLoading] = useState<'bom' | 'placement' | null>(null)
-  const [loading, setLoading] = useState({ active: true, progress: 0, file: '示例板' })
+  const [exportingProductionBom, setExportingProductionBom] = useState(false)
+  const [loading, setLoading] = useState({ active: false, progress: 0, file: '' })
   const [error, setError] = useState<string | null>(null)
   const [draggingImport, setDraggingImport] = useState<'gerber' | 'bom' | 'placement' | null>(null)
   const [thickness, setThickness] = useState(1.6)
@@ -440,10 +519,6 @@ function App() {
       setLoading((current) => ({ ...current, active: false }))
     }
   }
-
-  useEffect(() => {
-    void loadSources(createSampleSources())
-  }, [])
 
   useEffect(() => {
     void refreshFootprintModels().catch(() => undefined)
@@ -630,6 +705,16 @@ function App() {
     else void handleAuxiliaryFile(kind, files[0])
   }
 
+  const clearGerber = () => {
+    setBoard(null)
+    setGerberImportName('')
+    setSelectedBomId(null)
+    setBomRowOrientations(new Map())
+    setCameraPreset('iso')
+    setCameraRevision((revision) => revision + 1)
+    setError(null)
+  }
+
   const choosePreset = (preset: CameraPreset) => {
     setCameraPreset(preset)
     setCameraRevision((revision) => revision + 1)
@@ -776,10 +861,11 @@ function App() {
         || left.libraryItem.materialName.localeCompare(right.libraryItem.materialName, 'zh-CN')
       ))
   }, [bomReplaceTarget, componentLibraryData])
-  const confirmedBomCount = useMemo(
-    () => bomData?.items.filter((item) => confirmedBomIds.has(item.id)).length ?? 0,
+  const confirmedBomItems = useMemo(
+    () => bomData?.items.filter((item) => confirmedBomIds.has(item.id)) ?? [],
     [bomData, confirmedBomIds],
   )
+  const confirmedBomCount = confirmedBomItems.length
   const bomTableWidth = useMemo(
     () => bomTableColumns.reduce((total, column) => total + bomColumnWidths[column.key], 0),
     [bomColumnWidths],
@@ -902,6 +988,111 @@ function App() {
       else next.add(itemId)
       return next
     })
+  }
+
+  const exportProductionBom = async () => {
+    if (confirmedBomItems.length === 0) {
+      setError('请先勾选至少一条已核对的 BOM 元件')
+      return
+    }
+
+    setExportingProductionBom(true)
+    try {
+      const fileName = productionBomFileName(bomFile)
+      // The picker must be opened before the first await to retain the button's user activation.
+      const saveHandle = requestProductionBomSaveHandle(fileName)
+      const XLSX = await import('xlsx-js-style')
+      const projectName = board?.name || bomFile?.name.replace(/\.[^.]+$/, '') || '生产BOM'
+      const exportDate = new Date()
+      const exportDateSerial = Math.floor(
+        Date.UTC(exportDate.getFullYear(), exportDate.getMonth(), exportDate.getDate()) / 86_400_000,
+      ) + 25_569
+      const rows = confirmedBomItems.map((item, index) => [
+        index + 1,
+        item.sku,
+        item.materialName,
+        item.value || item.partNumber,
+        item.description,
+        item.footprint,
+        item.designators.join(', '),
+        item.quantity,
+        '',
+        '',
+      ])
+      const worksheet = XLSX.utils.aoa_to_sheet([
+        ['项目名', '', '', '', '', '', '生产用量', '', '', '日期'],
+        [projectName, '', '', '', '', '', '', '', '', exportDateSerial],
+        productionBomExportHeaders,
+        ...rows,
+      ], { cellDates: true })
+      worksheet['!cols'] = [
+        { width: 8.625 },
+        { width: 13.5 },
+        { width: 17.5 },
+        { width: 36.625 },
+        { width: 59.625 },
+        { width: 22.125 },
+        { width: 80.625 },
+        { width: 19.625 },
+        { width: 17.375 },
+        { width: 38.625 },
+      ]
+      worksheet['!rows'] = [
+        { hpt: 17.1 },
+        { hpt: 17.1 },
+        { hpt: 17.1 },
+      ]
+      worksheet['!merges'] = [
+        XLSX.utils.decode_range('A1:F1'),
+        XLSX.utils.decode_range('A2:F2'),
+        XLSX.utils.decode_range('G1:I1'),
+        XLSX.utils.decode_range('G2:I2'),
+      ]
+      worksheet['!autofilter'] = { ref: `A3:J${rows.length + 3}` }
+
+      for (let columnIndex = 0; columnIndex < productionBomExportHeaders.length; columnIndex += 1) {
+        const column = XLSX.utils.encode_col(columnIndex)
+        worksheet[`${column}1`].s = productionBomInfoStyle
+        worksheet[`${column}2`].s = columnIndex === 9 ? {
+          ...productionBomInfoStyle,
+          numFmt: 'mm-dd-yy',
+        } : productionBomInfoStyle
+        worksheet[`${column}3`].s = productionBomHeaderStyle
+      }
+      worksheet.J2.z = 'mm-dd-yy'
+      rows.forEach((_, rowIndex) => {
+        const sheetRow = rowIndex + 4
+        for (let columnIndex = 0; columnIndex < productionBomExportHeaders.length; columnIndex += 1) {
+          const column = XLSX.utils.encode_col(columnIndex)
+          worksheet[`${column}${sheetRow}`].s = (columnIndex === 0 || columnIndex === 7 || columnIndex === 8)
+            ? productionBomNumberStyle
+            : productionBomDataStyle
+        }
+      })
+
+      const workbook = XLSX.utils.book_new()
+      XLSX.utils.book_append_sheet(workbook, worksheet, '生产BOM')
+      if (saveHandle) {
+        const workbookData = XLSX.write(workbook, { bookType: 'xlsx', type: 'array', compression: true })
+        const fileHandle = await saveHandle
+        const writable = await fileHandle.createWritable()
+        await writable.write(new Blob([workbookData], {
+          type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        }))
+        await writable.close()
+      } else {
+        XLSX.writeFile(workbook, fileName, { bookType: 'xlsx', compression: true })
+      }
+      setError(null)
+    } catch (exportError) {
+      if (isSavePickerCancelled(exportError)) {
+        setError(null)
+        return
+      }
+      setError(`生产 BOM 导出失败：${exportError instanceof Error ? exportError.message : '未知错误'}`)
+    } finally {
+      setExportingProductionBom(false)
+    }
   }
 
   const selectBomItem = (itemId: string) => {
@@ -1255,6 +1446,19 @@ function App() {
         </div>
 
         <div className="topbar-actions">
+          <button
+            className="production-bom-export-button"
+            type="button"
+            disabled={confirmedBomCount === 0 || exportingProductionBom}
+            onClick={() => void exportProductionBom()}
+            aria-label="导出生产BOM"
+            title={confirmedBomCount > 0
+              ? `导出 ${confirmedBomCount} 条已确认的元件`
+              : '请先勾选确认的 BOM 元件'}
+          >
+            {exportingProductionBom ? <LoaderCircle className="spin" size={15} /> : <Download size={15} />}
+            <span>导出生产BOM</span>
+          </button>
           <div className="view-segment" aria-label="视图方向">
             <button
               className={cameraPreset === 'iso' ? 'active' : ''}
@@ -1314,9 +1518,16 @@ function App() {
                 <strong>Gerber</strong>
                 <span title={gerberImportName}>{board ? `${gerberImportName} · ${board.sources.length} 个文件` : 'ZIP / Gerber'}</span>
               </div>
-              <button onClick={() => gerberInputRef.current?.click()} title="导入 Gerber" aria-label="导入 Gerber">
-                <FolderOpen size={16} />
-              </button>
+              <div className="import-target-actions">
+                <button onClick={() => gerberInputRef.current?.click()} title="导入 Gerber" aria-label="导入 Gerber">
+                  <FolderOpen size={16} />
+                </button>
+                {board && (
+                  <button onClick={clearGerber} title="清空 Gerber" aria-label="清空 Gerber">
+                    <Trash2 size={15} />
+                  </button>
+                )}
+              </div>
             </div>
 
             <div

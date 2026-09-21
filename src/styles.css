@@ -125,6 +125,37 @@ button {
   padding-right: 12px;
 }
 
+.production-bom-export-button {
+  display: inline-flex;
+  height: 34px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  border: 1px solid #438568;
+  border-radius: 5px;
+  color: #e8f6ee;
+  background: #21553f;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.production-bom-export-button:hover:not(:disabled) {
+  border-color: #5dae88;
+  background: #2b694f;
+}
+
+.production-bom-export-button:disabled {
+  border-color: #35423a;
+  color: #758077;
+  background: #252d28;
+  cursor: not-allowed;
+}
+
+.production-bom-export-button span {
+  white-space: nowrap;
+}
+
 .view-segment {
   display: grid;
   grid-template-columns: 50px 58px 58px;
@@ -260,6 +291,11 @@ button {
   display: grid;
   gap: 3px;
   min-width: 0;
+}
+
+.import-target-actions {
+  display: flex !important;
+  gap: 4px;
 }
 
 .import-target strong {
@@ -3743,6 +3779,27 @@ button {
   .library-field-nav button.active {
     border-left-color: transparent;
     border-bottom-color: var(--accent);
+  }
+}
+
+@media (max-width: 620px) {
+  .production-bom-export-button {
+    width: 34px;
+    justify-content: center;
+    padding: 0;
+  }
+
+  .production-bom-export-button span,
+  .view-segment button span {
+    display: none;
+  }
+
+  .view-segment {
+    grid-template-columns: repeat(3, 34px);
+  }
+
+  .view-segment button {
+    padding: 0;
   }
 }
 

@@ -64,10 +64,17 @@ const drillColor = 0x090c0a
 const substrateColor = 0xd8ad4f
 const RASTER_LAYER_THRESHOLD = 500
 const FOOTPRINT_MODEL_SCALE = 1000
+const MAX_RENDER_PIXELS = 2_500_000
 const footprintLoader = new GLTFLoader()
 const footprintTemplateCache = new Map<string, Promise<THREE.Group>>()
 const boardNormal = new THREE.Vector3(0, 0, 1)
 const boardTangent = new THREE.Vector3(1, 0, 0)
+
+function stableRenderPixelRatio(width: number, height: number): number {
+  const devicePixelRatio = Math.min(window.devicePixelRatio || 1, 2)
+  const pixelBudgetRatio = Math.sqrt(MAX_RENDER_PIXELS / Math.max(width * height, 1))
+  return Math.min(devicePixelRatio, pixelBudgetRatio)
+}
 
 function requiresFlatPostureValidation(model: FootprintModel) {
   return /(?:^|_)(?:R|C|L)_?\d{4}|SOT|SOD/i.test(model.name)
@@ -1259,6 +1266,7 @@ export default function PcbViewer({
   const [renderError, setRenderError] = useState<string | null>(null)
   const [selectionNotice, setSelectionNotice] = useState<string | null>(null)
   const [viewportRevision, setViewportRevision] = useState(0)
+  const [rendererEpoch, setRendererEpoch] = useState(0)
 
   const cancelCameraFocusAnimation = () => {
     if (cameraFocusAnimationRef.current === null) return
@@ -1482,14 +1490,32 @@ export default function PcbViewer({
       const camera = new THREE.PerspectiveCamera(34, 1, 0.1, 2000)
       camera.up.set(0, 0, 1)
       const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, powerPreference: 'high-performance' })
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+      renderer.setPixelRatio(1)
       renderer.outputColorSpace = THREE.SRGBColorSpace
       renderer.toneMapping = THREE.ACESFilmicToneMapping
       renderer.toneMappingExposure = 1.05
-      renderer.shadowMap.enabled = true
-      renderer.shadowMap.type = THREE.PCFSoftShadowMap
+      // 上百个 STEP 实例的逐帧实时阴影会显著增加 GPU 负载，而板级检视中阴影收益很小。
+      renderer.shadowMap.enabled = false
       renderer.domElement.tabIndex = 0
       host.appendChild(renderer.domElement)
+
+      let contextLost = false
+      const recoverRenderer = (message: string) => {
+        if (contextLost) return
+        contextLost = true
+        if (animationRef.current !== null) {
+          cancelAnimationFrame(animationRef.current)
+          animationRef.current = null
+        }
+        pixelCheckRequestedRef.current = true
+        setRenderError(message)
+        setRendererEpoch((epoch) => epoch + 1)
+      }
+      const handleContextLost = (event: Event) => {
+        event.preventDefault()
+        recoverRenderer('WebGL 图形上下文已丢失，正在重新初始化 3D 视图…')
+      }
+      renderer.domElement.addEventListener('webglcontextlost', handleContextLost)
 
       const composer = new EffectComposer(renderer)
       const renderPass = new RenderPass(scene, camera)
@@ -1597,7 +1623,6 @@ export default function PcbViewer({
       scene.add(new THREE.HemisphereLight(0xf7f4e8, 0x16211b, 2.1))
       const keyLight = new THREE.DirectionalLight(0xffffff, 3.2)
       keyLight.position.set(-55, -60, 95)
-      keyLight.castShadow = true
       scene.add(keyLight)
       const fillLight = new THREE.DirectionalLight(0xd8e7ff, 1.35)
       fillLight.position.set(80, 30, 45)
@@ -1627,7 +1652,7 @@ export default function PcbViewer({
       const resize = () => {
         const width = Math.max(host.clientWidth, 1)
         const height = Math.max(host.clientHeight, 1)
-        const pixelRatio = Math.min(window.devicePixelRatio || 1, 2)
+        const pixelRatio = stableRenderPixelRatio(width, height)
         renderer.setPixelRatio(pixelRatio)
         composer.setPixelRatio(pixelRatio)
         camera.aspect = width / height
@@ -1643,9 +1668,11 @@ export default function PcbViewer({
       const observer = new ResizeObserver(resize)
       observer.observe(host)
       resize()
+      setRenderError(null)
 
       const cameraOffset = new THREE.Vector3()
       const animate = () => {
+        if (contextLost) return
         controls.update()
         grid.position.z = camera.position.z >= 0 ? -4 : 4
         renderer.domElement.dataset.gridZ = String(grid.position.z)
@@ -1776,11 +1803,20 @@ export default function PcbViewer({
           renderer.domElement.dataset.placementOffsets = ''
         }
         updateSelectionOverlay(camera, renderer.domElement)
-        composer.render()
+        try {
+          composer.render()
+        } catch (error) {
+          recoverRenderer(error instanceof Error ? error.message : 'WebGL 渲染失败，正在重新初始化 3D 视图…')
+          return
+        }
         if (pixelCheckRequestedRef.current) {
           const context = renderer.getContext()
           const width = context.drawingBufferWidth
           const height = context.drawingBufferHeight
+          if (context.isContextLost() || width === 0 || height === 0) {
+            recoverRenderer('WebGL 图形上下文已丢失，正在重新初始化 3D 视图…')
+            return
+          }
           const pixels = new Uint8Array(width * height * 4)
           context.readPixels(0, 0, width, height, context.RGBA, context.UNSIGNED_BYTE, pixels)
           const step = Math.max(1, Math.floor((width * height) / 24000))
@@ -1809,6 +1845,7 @@ export default function PcbViewer({
 
       return () => {
         observer.disconnect()
+        renderer.domElement.removeEventListener('webglcontextlost', handleContextLost)
         renderer.domElement.removeEventListener('pointerdown', handlePointerDown)
         renderer.domElement.removeEventListener('pointermove', handlePointerMove)
         renderer.domElement.removeEventListener('pointerup', handlePointerUp)
@@ -1833,7 +1870,7 @@ export default function PcbViewer({
     } catch (error) {
       setRenderError(error instanceof Error ? error.message : 'WebGL 初始化失败')
     }
-  }, [])
+  }, [rendererEpoch])
 
   useEffect(() => {
     const scene = sceneRef.current
@@ -1866,7 +1903,7 @@ export default function PcbViewer({
     } catch (error) {
       setRenderError(error instanceof Error ? error.message : '3D 几何生成失败')
     }
-  }, [board, thickness, boardColor])
+  }, [board, thickness, boardColor, rendererEpoch])
 
   useEffect(() => {
     const scene = sceneRef.current
@@ -1931,7 +1968,16 @@ export default function PcbViewer({
     if (cameraRef.current) applyComponentVisibility(object, visibility.components, cameraRef.current.position.z)
     focusSelectionWhenReady()
     pixelCheckRequestedRef.current = true
-  }, [board, thickness, alignment, bomItems, footprintModelOverrides, selectedDesignators, selectionRevision])
+  }, [
+    board,
+    thickness,
+    alignment,
+    bomItems,
+    footprintModelOverrides,
+    selectedDesignators,
+    selectionRevision,
+    rendererEpoch,
+  ])
 
   useEffect(() => {
     bomRowOrientationsRef.current = bomRowOrientations
@@ -1979,7 +2025,7 @@ export default function PcbViewer({
     camera.updateProjectionMatrix()
     controls.update()
     pixelCheckRequestedRef.current = true
-  }, [board, cameraPreset, cameraRevision, viewportRevision])
+  }, [board, cameraPreset, cameraRevision, viewportRevision, rendererEpoch])
 
   return (
     <div className="viewer-host" ref={hostRef}>

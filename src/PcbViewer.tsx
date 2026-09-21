@@ -299,6 +299,87 @@ function findModelOrientationRoot(marker: THREE.Object3D): THREE.Group | undefin
   return result
 }
 
+interface FootprintPlaceholderDimensions {
+  width: number
+  length: number
+  height: number
+}
+
+const passiveFootprintPlaceholderDimensions: Record<string, FootprintPlaceholderDimensions> = {
+  '0201': { width: 0.6, length: 0.3, height: 0.28 },
+  '0402': { width: 1, length: 0.5, height: 0.32 },
+  '0603': { width: 1.6, length: 0.8, height: 0.45 },
+  '0805': { width: 2, length: 1.25, height: 0.55 },
+  '1206': { width: 3.2, length: 1.6, height: 0.65 },
+  '1210': { width: 3.2, length: 2.5, height: 0.72 },
+  '1812': { width: 4.5, length: 3.2, height: 0.9 },
+  '2010': { width: 5, length: 2.5, height: 0.9 },
+  '2512': { width: 6.3, length: 3.2, height: 1 },
+}
+
+function footprintPlaceholderDimensions(item: BomItem): FootprintPlaceholderDimensions {
+  const footprint = item.footprint.toUpperCase().replace(/\s+/g, '')
+  const passiveCode = Object.keys(passiveFootprintPlaceholderDimensions).find((code) => footprint.includes(code))
+  if (passiveCode) return passiveFootprintPlaceholderDimensions[passiveCode]
+
+  const explicitSize = footprint.match(/(?:^|[_-])(\d{1,2}(?:[.P]\d+)?)\s*[X×]\s*(\d{1,2}(?:[.P]\d+)?)(?:MM)?(?:$|[_-])/)
+  if (explicitSize) {
+    const width = Number(explicitSize[1].replace('P', '.'))
+    const length = Number(explicitSize[2].replace('P', '.'))
+    if (Number.isFinite(width) && Number.isFinite(length) && width >= 0.4 && length >= 0.4 && width <= 50 && length <= 50) {
+      return {
+        width,
+        length,
+        height: THREE.MathUtils.clamp(Math.min(width, length) * 0.28, 0.45, 1.6),
+      }
+    }
+  }
+
+  if (/SOT[-_]?23/.test(footprint)) return { width: 3, length: 1.7, height: 0.9 }
+  if (/SOT[-_]?89/.test(footprint)) return { width: 4.5, length: 2.5, height: 1.2 }
+  if (/SOT[-_]?223/.test(footprint)) return { width: 6.7, length: 3.5, height: 1.4 }
+  if (/SOT[-_]?(?:252|89)/.test(footprint)) return { width: 6.5, length: 6.5, height: 1.5 }
+  if (/SOD[-_]?123/.test(footprint)) return { width: 3.7, length: 1.8, height: 0.8 }
+  if (/SOD[-_]?323/.test(footprint)) return { width: 2.5, length: 1.3, height: 0.7 }
+
+  const pinCount = Number(footprint.match(/(?:QFN|DFN|QFP|LQFP|TQFP|SOIC|SOP|TSSOP|SSOP)[-_]?(\d{1,3})/)?.[1] ?? 0)
+  if (/(?:QFN|DFN)/.test(footprint)) {
+    const edge = pinCount <= 16 ? 3 : pinCount <= 24 ? 4 : pinCount <= 32 ? 5 : pinCount <= 48 ? 7 : 9
+    return { width: edge, length: edge, height: 0.8 }
+  }
+  if (/(?:L?QFP|TQFP)/.test(footprint)) {
+    const edge = pinCount <= 48 ? 7 : pinCount <= 64 ? 10 : pinCount <= 100 ? 14 : 20
+    return { width: edge, length: edge, height: 1.2 }
+  }
+  if (/(?:SOIC|SOP|TSSOP|SSOP)/.test(footprint)) {
+    if (pinCount <= 8) return { width: 5, length: 4, height: 1.4 }
+    if (pinCount <= 16) return { width: 10, length: 4, height: 1.5 }
+    return { width: 13, length: 8, height: 1.5 }
+  }
+
+  return { width: 3.2, length: 2, height: 0.8 }
+}
+
+function createFootprintPlaceholder(item: BomItem): THREE.Mesh {
+  const { width, length, height } = footprintPlaceholderDimensions(item)
+  const placeholder = new THREE.Mesh(
+    new THREE.BoxGeometry(width, length, height),
+    new THREE.MeshStandardMaterial({
+      color: 0x5a90d6,
+      emissive: 0x112b4d,
+      emissiveIntensity: 0.18,
+      roughness: 0.56,
+      metalness: 0.04,
+    }),
+  )
+  placeholder.position.z = height / 2
+  placeholder.castShadow = true
+  placeholder.receiveShadow = true
+  placeholder.userData.placeholder = true
+  placeholder.userData.placeholderDimensions = { width, length, height }
+  return placeholder
+}
+
 function createPlacementObject(
   board: ParsedBoard,
   thickness: number,
@@ -319,6 +400,7 @@ function createPlacementObject(
   root.userData.modelMatchedCount = 0
   root.userData.modelLoadedCount = 0
   root.userData.modelFailedCount = 0
+  root.userData.placeholderCount = 0
   root.userData.postureValidCount = 0
   root.userData.postureInvalidDesignators = [] as string[]
   root.userData.contactValidCount = 0
@@ -348,10 +430,7 @@ function createPlacementObject(
     const designator = placement.designator.trim().toUpperCase()
     const item = itemByDesignator.get(designator)
     if (!item) return
-    // App 只把已完成数据库核对、且已自动或人工绑定模型的 BOM 行传进来。
-    // 这里不再按裸封装名兜底，避免未经金蝶确认的元件出现在 PCB 上。
     const model = footprintModelOverrides.get(item.id)
-    if (!model) return
     const isSelected = selected.has(designator)
     const side: SurfaceSide = placement.side === 'bottom' ? 'bottom' : 'top'
 
@@ -387,6 +466,25 @@ function createPlacementObject(
     root.add(marker)
 
     applyPlacementOrientation(marker, getBomRowOrientation(item.id))
+
+    const addPlaceholder = (reason: 'missing-model' | 'load-failed') => {
+      const placeholder = createFootprintPlaceholder(item)
+      placeholder.name = `footprint-placeholder:${item.footprint || 'unknown'}:${designator}`
+      if (isSelected) highlightFootprintInstance(placeholder)
+      modelRoot.add(placeholder)
+      applyPlacementOrientation(marker, getBomRowOrientation(item.id))
+      marker.userData.modelLoaded = true
+      marker.userData.placeholder = true
+      marker.userData.placeholderReason = reason
+      root.userData.placeholderCount += 1
+    }
+
+    // App 提供全部 BOM 行：已绑定 STEP 的元件显示实际模型，其余以封装尺寸方框表示。
+    if (!model) {
+      addPlaceholder('missing-model')
+      scheduleModelProgress()
+      return
+    }
 
     root.userData.modelMatchedCount += 1
     void loadFootprintTemplate(model).then((template) => {
@@ -428,6 +526,7 @@ function createPlacementObject(
       if (root.userData.disposed) return
       root.userData.modelFailedCount += 1
       marker.userData.modelError = error instanceof Error ? error.message : String(error)
+      addPlaceholder('load-failed')
       scheduleModelProgress()
     })
   })

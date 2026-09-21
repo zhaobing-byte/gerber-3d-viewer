@@ -322,15 +322,15 @@ function materialModelBindingKey(item: ComponentLibraryItem): string {
 }
 
 /**
- * 人工「替换元件」结果的持久化键。取 BOM 行的「描述」（金蝶导出的 BOM 这一列就是
- * 物料名，重新导入同一份 BOM 时不变）→ 归一化；没有描述时退到物料名称。
+ * 人工「替换元件」结果的持久化键。只用于定位历史人工决定，不作为自动匹配条件；
+ * 回放时仍须通过当前 BOM 的规格与封装校验。
  */
 function materialMatchKey(item: BomItem): string {
   const source = normalizeText(item.description || item.materialName)
   return source ? `mat:${source}` : ''
 }
 
-/** 重新导入 BOM 时回放人工核对决定；物料在 ERP 里已不存在则作废（不报错）。 */
+/** 重新导入 BOM 时回放人工核对决定；规格或封装不符时仍保留在待处理区。 */
 function recallSavedMatch(
   item: BomItem,
   library: ParsedComponentLibraryFile | null,
@@ -340,7 +340,9 @@ function recallSavedMatch(
   const sku = key ? savedMatches[key] : undefined
   if (!sku) return null
   const libraryItem = (library?.items ?? []).find((candidate) => candidate.sku === sku)
-  return libraryItem ? { libraryItem, score: scoreBomLibraryCandidate(item, libraryItem) } : null
+  if (!libraryItem) return null
+  const score = scoreBomLibraryCandidate(item, libraryItem)
+  return score > 0 ? { libraryItem, score } : null
 }
 
 function loadStringMap(storageKey: string): StringMap {
@@ -368,6 +370,7 @@ function App() {
   const gerberInputRef = useRef<HTMLInputElement>(null)
   const bomInputRef = useRef<HTMLInputElement>(null)
   const bomTableWrapRef = useRef<HTMLDivElement | null>(null)
+  const pendingBomTableWrapRef = useRef<HTMLDivElement | null>(null)
   const placementInputRef = useRef<HTMLInputElement>(null)
   const [board, setBoard] = useState<ParsedBoard | null>(null)
   const [gerberImportName, setGerberImportName] = useState('')
@@ -444,8 +447,10 @@ function App() {
     grid: true,
   })
   const selectedBomItem = useMemo(
-    () => bomData?.items.find((item) => item.id === selectedBomId) ?? null,
-    [bomData, selectedBomId],
+    () => bomData?.items.find((item) => item.id === selectedBomId)
+      ?? pendingBomItems.find((entry) => entry.item.id === selectedBomId)?.item
+      ?? null,
+    [bomData, pendingBomItems, selectedBomId],
   )
 
   const adjustSelectedBomRowOrientation = (axis: keyof PackageOrientation) => {
@@ -585,16 +590,30 @@ function App() {
   useEffect(() => {
     if (!selectedBomId) return
     const frame = requestAnimationFrame(() => {
-      const wrap = bomTableWrapRef.current
-      const row = wrap?.querySelector<HTMLTableRowElement>('tbody tr[aria-selected="true"]')
-      if (!row || !wrap) return
-      const headerHeight = wrap.querySelector('thead')?.offsetHeight ?? 0
-      const rowTop = row.offsetTop
-      const rowBottom = rowTop + row.offsetHeight
-      const visibleTop = wrap.scrollTop + headerHeight
-      const visibleBottom = wrap.scrollTop + wrap.clientHeight
-      if (rowTop < visibleTop) wrap.scrollTop = Math.max(0, rowTop - headerHeight)
-      else if (rowBottom > visibleBottom) wrap.scrollTop = rowBottom - wrap.clientHeight
+      const revealSelectedRow = (wrap: HTMLDivElement | null) => {
+        if (!wrap) return false
+        const row = Array.from(wrap.querySelectorAll<HTMLTableRowElement>('tbody tr[data-bom-id]'))
+          .find((candidate) => candidate.dataset.bomId === selectedBomId)
+        if (!row) return false
+
+        // 用屏幕坐标而不是 table 内的 offsetTop，避免 sticky 表头和两个独立滚动表导致定位偏差。
+        const wrapBounds = wrap.getBoundingClientRect()
+        const headerBottom = wrap.querySelector('thead')?.getBoundingClientRect().bottom ?? wrapBounds.top
+        const visibleTop = Math.min(wrapBounds.bottom, Math.max(wrapBounds.top, headerBottom))
+        const visibleBottom = wrapBounds.bottom
+        const rowBounds = row.getBoundingClientRect()
+        const margin = 8
+        if (rowBounds.top < visibleTop + margin) {
+          wrap.scrollTop += rowBounds.top - visibleTop - margin
+        } else if (rowBounds.bottom > visibleBottom - margin) {
+          wrap.scrollTop += rowBounds.bottom - visibleBottom + margin
+        }
+        row.focus({ preventScroll: true })
+        return true
+      }
+
+      // 一个 BOM 行只会属于其中一张表；先匹配主表，再匹配待处理表。
+      revealSelectedRow(bomTableWrapRef.current) || revealSelectedRow(pendingBomTableWrapRef.current)
     })
     return () => cancelAnimationFrame(frame)
   }, [selectedBomId, bomQuery, bomSelectionRevision])
@@ -764,8 +783,11 @@ function App() {
     [footprintModels],
   )
   const pcbBomItems = useMemo(
-    () => (bomData?.items ?? []).filter((item) => bomLibraryMatches.has(item.id)),
-    [bomData, bomLibraryMatches],
+    () => [
+      ...(bomData?.items ?? []),
+      ...pendingBomItems.map((entry) => entry.item),
+    ],
+    [bomData, pendingBomItems],
   )
   const filteredBomItems = useMemo(() => {
     const query = bomQuery.trim().toLocaleLowerCase()
@@ -1104,7 +1126,9 @@ function App() {
     const normalizedDesignator = designator.trim().toUpperCase()
     const item = bomData?.items.find((candidate) => candidate.designators.some(
       (candidateDesignator) => candidateDesignator.trim().toUpperCase() === normalizedDesignator,
-    ))
+    )) ?? pendingBomItems.find((entry) => entry.item.designators.some(
+      (candidateDesignator) => candidateDesignator.trim().toUpperCase() === normalizedDesignator,
+    ))?.item
     if (!item) return
     setBomQuery('')
     setBomCellEdit(null)
@@ -1766,7 +1790,7 @@ function App() {
 
         <section className="data-note">
           <Info size={16} />
-          <span>仅显示已通过数据库核对且具有 STEP 封装的元件。</span>
+          <span>STEP 封装显示实际模型；未匹配或未绑定模型的元件显示尺寸方框。</span>
         </section>
       </aside>
 
@@ -1999,6 +2023,7 @@ function App() {
               <div
                 className={`bom-table-wrap pending-bom-table-wrap ${resizingBomColumn ? 'resizing-columns' : ''}`}
                 aria-label="待处理元件列表"
+                ref={pendingBomTableWrapRef}
               >
                 <table className="bom-table pending-bom-table" style={{ width: bomTableWidth }}>
                   {renderBomColumnGroup()}
@@ -2006,6 +2031,7 @@ function App() {
                   <tbody>
                     {pendingBomItems.map((entry) => {
                       const item = entry.item
+                      const isSelected = selectedBomId === item.id
                       const details = [
                         item.sku,
                         item.materialName,
@@ -2016,7 +2042,29 @@ function App() {
                         item.description,
                       ].filter(Boolean).join(' · ')
                       return (
-                        <tr key={item.id}>
+                        <tr
+                          aria-selected={isSelected}
+                          className={isSelected ? 'selected' : ''}
+                          data-bom-id={item.id}
+                          key={item.id}
+                          onClick={(event) => {
+                            const target = event.target
+                            if (target instanceof Element && target.closest('button')) return
+                            selectBomItem(item.id)
+                          }}
+                          onKeyDown={(event) => {
+                            if (event.target !== event.currentTarget) return
+                            if (event.key === 'Enter') {
+                              event.preventDefault()
+                              selectBomItem(item.id)
+                            } else if (event.key === ' ') {
+                              event.preventDefault()
+                              if (isSelected) adjustSelectedBomRowOrientation('rotationZ')
+                              else selectBomItem(item.id)
+                            }
+                          }}
+                          tabIndex={0}
+                        >
                           <td className="bom-check-cell" aria-label="待处理元件" />
                           <td className="bom-sku" title={item.sku}>{item.sku || '—'}</td>
                           <td className="bom-name" title={item.materialName}>{item.materialName || '—'}</td>

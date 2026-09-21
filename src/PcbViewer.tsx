@@ -1152,7 +1152,7 @@ function normalizeWinding(points: THREE.Vector2[], clockwise: boolean): THREE.Ve
   return THREE.ShapeUtils.isClockWise(copy) === clockwise ? copy : copy.reverse()
 }
 
-function createProfileBoard(layer: ParsedLayer): THREE.Group | null {
+function createProfileShapes(layer: ParsedLayer) {
   const contours = buildProfileContours(layer)
   const shapes: THREE.Shape[] = []
 
@@ -1166,6 +1166,11 @@ function createProfileBoard(layer: ParsedLayer): THREE.Group | null {
     shapes.push(shape)
   })
 
+  return { contours, shapes }
+}
+
+function createProfileBoard(layer: ParsedLayer): THREE.Group | null {
+  const { contours, shapes } = createProfileShapes(layer)
   if (shapes.length === 0) return null
   const geometry = new THREE.ExtrudeGeometry(shapes, {
     depth: 1,
@@ -1175,17 +1180,27 @@ function createProfileBoard(layer: ParsedLayer): THREE.Group | null {
   geometry.translate(0, 0, -0.5)
   geometry.computeVertexNormals()
 
-  const capGeometry = new THREE.ShapeGeometry(shapes, 8)
-  const topCap = new THREE.Mesh(capGeometry)
-  topCap.position.z = 0.5002
-  const bottomCap = new THREE.Mesh(capGeometry.clone())
-  bottomCap.position.z = -0.5002
-
   const group = new THREE.Group()
   group.scale.set(layer.unitScale, layer.unitScale, 1)
   group.userData.profileContours = contours.length
   group.userData.profileSolids = shapes.length
-  group.add(new THREE.Mesh(geometry), topCap, bottomCap)
+  group.add(new THREE.Mesh(geometry))
+  return group
+}
+
+function createProfileSurface(layer: ParsedLayer, z: number): THREE.Group | null {
+  const { contours, shapes } = createProfileShapes(layer)
+  if (shapes.length === 0) return null
+
+  const geometry = new THREE.ShapeGeometry(shapes, 8)
+  geometry.computeVertexNormals()
+
+  const group = new THREE.Group()
+  group.scale.set(layer.unitScale, layer.unitScale, 1)
+  group.position.z = z
+  group.userData.profileContours = contours.length
+  group.userData.profileSolids = shapes.length
+  group.add(new THREE.Mesh(geometry))
   return group
 }
 
@@ -1252,43 +1267,39 @@ function buildBoardObject(
     depthWrite: true,
     metalness: 0,
     opacity: 1,
+    polygonOffset: false,
     roughness: 0.68,
     transparent: false,
   })
   setKind(body, 'board')
   root.add(body)
 
-  const topMaskBody = body.clone(true)
-  topMaskBody.scale.z = 0.018
-  topMaskBody.position.z = thickness / 2 + 0.012
-  replaceMaterial(topMaskBody, maskColor, {
-    depthWrite: true,
-    emissive: maskColor,
-    emissiveIntensity: 0.12,
-    metalness: 0,
-    opacity: 1,
-    roughness: 0.42,
-    transparent: false,
-  })
-  setSurfaceSide(topMaskBody, 'top')
-  setKind(topMaskBody, 'mask')
-  root.add(topMaskBody)
+  const addMaskSurface = (side: SurfaceSide) => {
+    const z = side === 'top' ? thickness / 2 + 0.018 : -thickness / 2 - 0.018
+    // 独立的单层阻焊表面避免了缩放整块 PCB 后，挤出顶面与额外顶面重叠造成的闪烁。
+    let maskBody = outlineLayer ? createProfileSurface(outlineLayer, z) : null
+    if (!maskBody) {
+      maskBody = body.clone(true)
+      maskBody.scale.z = 0.018
+      maskBody.position.z = z
+    }
+    replaceMaterial(maskBody, maskColor, {
+      depthWrite: true,
+      emissive: maskColor,
+      emissiveIntensity: 0.42,
+      metalness: 0,
+      opacity: 1,
+      polygonOffset: false,
+      roughness: 0.38,
+      transparent: false,
+    })
+    setSurfaceSide(maskBody, side)
+    setKind(maskBody, 'mask')
+    root.add(maskBody)
+  }
 
-  const bottomMaskBody = body.clone(true)
-  bottomMaskBody.scale.z = 0.018
-  bottomMaskBody.position.z = -thickness / 2 - 0.012
-  replaceMaterial(bottomMaskBody, maskColor, {
-    depthWrite: true,
-    emissive: maskColor,
-    emissiveIntensity: 0.12,
-    metalness: 0,
-    opacity: 1,
-    roughness: 0.42,
-    transparent: false,
-  })
-  setSurfaceSide(bottomMaskBody, 'bottom')
-  setKind(bottomMaskBody, 'mask')
-  root.add(bottomMaskBody)
+  addMaskSurface('top')
+  addMaskSurface('bottom')
 
   const byRole = (type: string, side?: string) =>
     board.layers.filter((layer) => layer.type === type && (!side || layer.side === side))

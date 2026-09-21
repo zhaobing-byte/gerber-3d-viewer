@@ -2385,6 +2385,9 @@ function App() {
                           const manualModel = manualLibraryModels.get(item.id)
                           const automaticMatch = componentLibraryFootprintMatches.get(item.id)
                           const matchedModel = manualModel ?? automaticMatch?.model
+                          const matchedPackageName = manualModel?.name
+                            ?? automaticMatch?.packageName
+                            ?? '待匹配'
                           const modelTitle = manualModel
                             ? `手动绑定：${manualModel.name}`
                             : automaticMatch
@@ -2403,7 +2406,7 @@ function App() {
                               </td>
                               <td>{item.dataStatus || '—'}</td>
                               <td>{item.disabledStatus || '—'}</td>
-                              <td>{item.unit || '—'}</td>
+                              <td title={matchedModel ? modelTitle : '待匹配'}>{matchedPackageName}</td>
                               <td className="library-model-cell" title={modelTitle}>
                                 {matchedModel ? (
                                   <div className="library-model-actions">

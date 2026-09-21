@@ -64,9 +64,12 @@ const drillColor = 0x090c0a
 const substrateColor = 0xd8ad4f
 const RASTER_LAYER_THRESHOLD = 500
 const FOOTPRINT_MODEL_SCALE = 1000
-const MAX_RENDER_PIXELS = 2_500_000
+const MAX_RENDER_PIXELS = 1_800_000
+const MAX_CONCURRENT_FOOTPRINT_LOADS = 4
 const footprintLoader = new GLTFLoader()
 const footprintTemplateCache = new Map<string, Promise<THREE.Group>>()
+const footprintLoadQueue: Array<() => void> = []
+let activeFootprintLoads = 0
 const boardNormal = new THREE.Vector3(0, 0, 1)
 const boardTangent = new THREE.Vector3(1, 0, 0)
 
@@ -74,6 +77,30 @@ function stableRenderPixelRatio(width: number, height: number): number {
   const devicePixelRatio = Math.min(window.devicePixelRatio || 1, 2)
   const pixelBudgetRatio = Math.sqrt(MAX_RENDER_PIXELS / Math.max(width * height, 1))
   return Math.min(devicePixelRatio, pixelBudgetRatio)
+}
+
+function runQueuedFootprintLoads() {
+  while (activeFootprintLoads < MAX_CONCURRENT_FOOTPRINT_LOADS && footprintLoadQueue.length > 0) {
+    const next = footprintLoadQueue.shift()
+    if (!next) return
+    activeFootprintLoads += 1
+    next()
+  }
+}
+
+function queueFootprintLoad<T>(load: () => Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    footprintLoadQueue.push(() => {
+      void Promise.resolve()
+        .then(load)
+        .then(resolve, reject)
+        .finally(() => {
+          activeFootprintLoads -= 1
+          runQueuedFootprintLoads()
+        })
+    })
+    runQueuedFootprintLoads()
+  })
 }
 
 function requiresFlatPostureValidation(model: FootprintModel) {
@@ -137,26 +164,28 @@ function loadFootprintTemplate(model: FootprintModel): Promise<THREE.Group> {
   const cached = footprintTemplateCache.get(cacheKey)
   if (cached) return cached
 
-  const request = (model.stepUrl
-    ? fetch(model.stepUrl).then(async (response) => {
-        if (!response.ok) throw new Error(`STEP HTTP ${response.status}`)
-        const template = await parseStepArrayBuffer(await response.arrayBuffer(), model.name)
-        template.userData.stepModel = true
-        return template
+  const request = queueFootprintLoad(() => (
+    (model.stepUrl
+      ? fetch(model.stepUrl).then(async (response) => {
+          if (!response.ok) throw new Error(`STEP HTTP ${response.status}`)
+          const template = await parseStepArrayBuffer(await response.arrayBuffer(), model.name)
+          template.userData.stepModel = true
+          return template
+        })
+      : footprintLoader.loadAsync(model.url).then((gltf) => gltf.scene)
+    ).then((template) => {
+      normalizeFootprintTemplate(template, model, Boolean(model.stepUrl))
+      template.name = `footprint-template:${model.name}`
+      template.traverse((child) => {
+        const mesh = child as THREE.Mesh
+        if (!mesh.isMesh) return
+        mesh.castShadow = true
+        mesh.receiveShadow = true
+        mesh.userData.sharedFootprintResource = true
       })
-    : footprintLoader.loadAsync(model.url).then((gltf) => gltf.scene)
-  ).then((template) => {
-    normalizeFootprintTemplate(template, model, Boolean(model.stepUrl))
-    template.name = `footprint-template:${model.name}`
-    template.traverse((child) => {
-      const mesh = child as THREE.Mesh
-      if (!mesh.isMesh) return
-      mesh.castShadow = true
-      mesh.receiveShadow = true
-      mesh.userData.sharedFootprintResource = true
+      return template
     })
-    return template
-  })
+  ))
   footprintTemplateCache.set(cacheKey, request)
   return request
 }
@@ -300,6 +329,15 @@ function createPlacementObject(
     .map((placement) => placement.designator)
     .join(',')
 
+  let modelProgressFrame: number | null = null
+  const scheduleModelProgress = () => {
+    if (root.userData.disposed || modelProgressFrame !== null) return
+    modelProgressFrame = requestAnimationFrame(() => {
+      modelProgressFrame = null
+      if (!root.userData.disposed) onModelProgress()
+    })
+  }
+
   const itemByDesignator = new Map<string, BomItem>()
   bomItems.forEach((item) => item.designators.forEach((designator) => {
     itemByDesignator.set(designator.trim().toUpperCase(), item)
@@ -385,12 +423,12 @@ function createPlacementObject(
       else (root.userData.contactInvalidDesignators as string[]).push(designator)
       marker.userData.modelLoaded = true
       root.userData.modelLoadedCount += 1
-      onModelProgress()
+      scheduleModelProgress()
     }).catch((error: unknown) => {
       if (root.userData.disposed) return
       root.userData.modelFailedCount += 1
       marker.userData.modelError = error instanceof Error ? error.message : String(error)
-      onModelProgress()
+      scheduleModelProgress()
     })
   })
 
@@ -1247,8 +1285,10 @@ export default function PcbViewer({
   const sceneRef = useRef<THREE.Scene | null>(null)
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null)
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null)
+  const composerRef = useRef<EffectComposer | null>(null)
   const outlinePassRef = useRef<OutlinePass | null>(null)
   const innerOutlinePassRef = useRef<OutlinePass | null>(null)
+  const outputPassRef = useRef<OutputPass | null>(null)
   const controlsRef = useRef<OrbitControls | null>(null)
   const boardRootRef = useRef<THREE.Group | null>(null)
   const componentRootRef = useRef<THREE.Group | null>(null)
@@ -1274,20 +1314,78 @@ export default function PcbViewer({
     cameraFocusAnimationRef.current = null
   }
 
+  const disposeSelectionPostprocessing = () => {
+    outlinePassRef.current?.dispose()
+    innerOutlinePassRef.current?.dispose()
+    outputPassRef.current?.dispose()
+    composerRef.current?.dispose()
+    outlinePassRef.current = null
+    innerOutlinePassRef.current = null
+    outputPassRef.current = null
+    composerRef.current = null
+  }
+
+  const ensureSelectionPostprocessing = () => {
+    if (composerRef.current && outlinePassRef.current && innerOutlinePassRef.current) {
+      return {
+        outlinePass: outlinePassRef.current,
+        innerOutlinePass: innerOutlinePassRef.current,
+      }
+    }
+
+    const renderer = rendererRef.current
+    const scene = sceneRef.current
+    const camera = cameraRef.current
+    if (!renderer || !scene || !camera) return null
+
+    disposeSelectionPostprocessing()
+    const composer = new EffectComposer(renderer)
+    const renderPass = new RenderPass(scene, camera)
+    const outlinePass = new OutlinePass(new THREE.Vector2(1, 1), scene, camera)
+    outlinePass.visibleEdgeColor.set(0x00e5ff)
+    outlinePass.hiddenEdgeColor.set(0x00e5ff)
+    outlinePass.edgeStrength = 4
+    outlinePass.edgeGlow = 0.12
+    outlinePass.edgeThickness = 2
+    outlinePass.pulsePeriod = 0
+    const innerOutlinePass = new OutlinePass(new THREE.Vector2(1, 1), scene, camera)
+    innerOutlinePass.visibleEdgeColor.set(0xffffff)
+    innerOutlinePass.hiddenEdgeColor.set(0xffffff)
+    innerOutlinePass.edgeStrength = 2.6
+    innerOutlinePass.edgeGlow = 0
+    innerOutlinePass.edgeThickness = 0.75
+    innerOutlinePass.pulsePeriod = 0
+    const outputPass = new OutputPass()
+    composer.addPass(renderPass)
+    composer.addPass(outlinePass)
+    composer.addPass(innerOutlinePass)
+    composer.addPass(outputPass)
+
+    const width = Math.max(renderer.domElement.clientWidth, 1)
+    const height = Math.max(renderer.domElement.clientHeight, 1)
+    composer.setPixelRatio(renderer.getPixelRatio())
+    composer.setSize(width, height)
+    composerRef.current = composer
+    outlinePassRef.current = outlinePass
+    innerOutlinePassRef.current = innerOutlinePass
+    outputPassRef.current = outputPass
+    return { outlinePass, innerOutlinePass }
+  }
+
   const clearSelectionEffects = () => {
     if (outlinePassRef.current) outlinePassRef.current.selectedObjects = []
     if (innerOutlinePassRef.current) innerOutlinePassRef.current.selectedObjects = []
     selectionOverlayItemsRef.current = []
     selectionOverlayRef.current?.replaceChildren()
+    disposeSelectionPostprocessing()
   }
 
   const showSelectionEffects = (components: SelectedComponentBounds[]) => {
     clearSelectionEffects()
-    if (outlinePassRef.current) {
-      outlinePassRef.current.selectedObjects = components.map(({ marker }) => marker)
-    }
-    if (innerOutlinePassRef.current) {
-      innerOutlinePassRef.current.selectedObjects = components.map(({ marker }) => marker)
+    const postprocessing = ensureSelectionPostprocessing()
+    if (postprocessing) {
+      postprocessing.outlinePass.selectedObjects = components.map(({ marker }) => marker)
+      postprocessing.innerOutlinePass.selectedObjects = components.map(({ marker }) => marker)
     }
     const overlay = selectionOverlayRef.current
     if (!overlay) return
@@ -1517,28 +1615,6 @@ export default function PcbViewer({
       }
       renderer.domElement.addEventListener('webglcontextlost', handleContextLost)
 
-      const composer = new EffectComposer(renderer)
-      const renderPass = new RenderPass(scene, camera)
-      const outlinePass = new OutlinePass(new THREE.Vector2(1, 1), scene, camera)
-      outlinePass.visibleEdgeColor.set(0x00e5ff)
-      outlinePass.hiddenEdgeColor.set(0x00e5ff)
-      outlinePass.edgeStrength = 4
-      outlinePass.edgeGlow = 0.12
-      outlinePass.edgeThickness = 2
-      outlinePass.pulsePeriod = 0
-      const innerOutlinePass = new OutlinePass(new THREE.Vector2(1, 1), scene, camera)
-      innerOutlinePass.visibleEdgeColor.set(0xffffff)
-      innerOutlinePass.hiddenEdgeColor.set(0xffffff)
-      innerOutlinePass.edgeStrength = 2.6
-      innerOutlinePass.edgeGlow = 0
-      innerOutlinePass.edgeThickness = 0.75
-      innerOutlinePass.pulsePeriod = 0
-      const outputPass = new OutputPass()
-      composer.addPass(renderPass)
-      composer.addPass(outlinePass)
-      composer.addPass(innerOutlinePass)
-      composer.addPass(outputPass)
-
       const controls = new OrbitControls(camera, renderer.domElement)
       controls.enableDamping = true
       controls.dampingFactor = 0.075
@@ -1554,6 +1630,7 @@ export default function PcbViewer({
       const raycaster = new THREE.Raycaster()
       const pointer = new THREE.Vector2()
       let pointerStart: { id: number; x: number; y: number } | null = null
+      let lastHoverRaycastAt = 0
       const findPlacementDesignator = (object: THREE.Object3D, root: THREE.Object3D) => {
         let current: THREE.Object3D | null = object
         while (current && current !== root) {
@@ -1586,6 +1663,16 @@ export default function PcbViewer({
         return null
       }
       const handlePointerMove = (event: PointerEvent) => {
+        if (selectionOverlayItemsRef.current.length === 0) {
+          if (hoveredDesignatorRef.current) {
+            hoveredDesignatorRef.current = null
+            renderer.domElement.dataset.hoveredDesignator = ''
+          }
+          return
+        }
+        const now = performance.now()
+        if (now - lastHoverRaycastAt < 50) return
+        lastHoverRaycastAt = now
         hoveredDesignatorRef.current = designatorAtPointer(event)
         renderer.domElement.dataset.hoveredDesignator = hoveredDesignatorRef.current ?? ''
       }
@@ -1602,6 +1689,7 @@ export default function PcbViewer({
       }
       const clearPointerStart = () => {
         pointerStart = null
+        lastHoverRaycastAt = 0
         hoveredDesignatorRef.current = null
         renderer.domElement.dataset.hoveredDesignator = ''
       }
@@ -1644,21 +1732,142 @@ export default function PcbViewer({
       sceneRef.current = scene
       cameraRef.current = camera
       rendererRef.current = renderer
-      outlinePassRef.current = outlinePass
-      innerOutlinePassRef.current = innerOutlinePass
       controlsRef.current = controls
       gridRef.current = grid
+
+      const cameraOffset = new THREE.Vector3()
+      const updateRendererDiagnostics = () => {
+        const canvas = renderer.domElement
+        const viewSide: SurfaceSide = camera.position.z >= 0 ? 'top' : 'bottom'
+        Object.assign(canvas.dataset, {
+          gridZ: String(grid.position.z),
+          gridVisible: String(grid.visible),
+          cameraPosition: camera.position.toArray().map((value) => value.toFixed(3)).join(','),
+          cameraTarget: controls.target.toArray().map((value) => value.toFixed(3)).join(','),
+          cameraDirection: cameraOffset
+            .copy(camera.position)
+            .sub(controls.target)
+            .normalize()
+            .toArray()
+            .map((value) => value.toFixed(5))
+            .join(','),
+          cameraDistance: camera.position.distanceTo(controls.target).toFixed(3),
+          viewSide,
+        })
+
+        const boardRoot = boardRootRef.current
+        const visibleSurfaceGroups = boardRoot?.children.filter(
+          (child) => child.visible && child.userData.surfaceSide,
+        ) ?? []
+        Object.assign(canvas.dataset, {
+          visibleTopGroups: String(
+            visibleSurfaceGroups.filter((child) => child.userData.surfaceSide === 'top').length,
+          ),
+          visibleBottomGroups: String(
+            visibleSurfaceGroups.filter((child) => child.userData.surfaceSide === 'bottom').length,
+          ),
+        })
+
+        const componentRoot = componentRootRef.current
+        if (!componentRoot) {
+          Object.assign(canvas.dataset, {
+            alignmentMode: '',
+            placementCount: '0',
+            placementInside: '0',
+            placementOutside: '',
+            modelMatched: '0',
+            modelLoaded: '0',
+            modelFailed: '0',
+            visiblePlacements: '0',
+            selectedPlacements: '0',
+            focusedPlacements: '0',
+            focusDistance: '',
+            focusMargin: '',
+            focusCoverage: '',
+            focusTarget: '',
+            focusAnimation: '',
+            selectionRequested: '0',
+            outlineSelected: '0',
+            postureValid: '0',
+            postureInvalid: '',
+            contactValid: '0',
+            contactInvalid: '',
+            topPlacementRotations: '',
+            bottomPlacementRotations: '',
+            rotatedPlacements: '0',
+            flippedPlacements: '0',
+            movedPlacements: '0',
+            placementOffsets: '',
+          })
+          return
+        }
+
+        const placementMarkers = componentRoot.children.filter((child) => child.userData.placementMarker)
+        const movedMarkers = placementMarkers.filter((child) => (
+          child.userData.appliedOffsetX !== 0
+          || child.userData.appliedOffsetY !== 0
+          || child.userData.appliedOffsetZ !== 0
+        ))
+        Object.assign(canvas.dataset, {
+          alignmentMode: String(componentRoot.userData.alignmentMode),
+          placementCount: String(componentRoot.userData.placementCount),
+          placementInside: String(componentRoot.userData.insideCount),
+          placementOutside: String(componentRoot.userData.outsideDesignators),
+          modelMatched: String(componentRoot.userData.modelMatchedCount),
+          modelLoaded: String(componentRoot.userData.modelLoadedCount),
+          modelFailed: String(componentRoot.userData.modelFailedCount),
+          visiblePlacements: String(placementMarkers.filter((child) => child.visible).length),
+          selectedPlacements: String(placementMarkers.filter((child) => child.userData.selected).length),
+          focusedPlacements: String(componentRoot.userData.selectionFocusCount ?? 0),
+          focusDistance: String(componentRoot.userData.selectionFocusDistance ?? ''),
+          focusMargin: String(componentRoot.userData.selectionFocusMargin ?? ''),
+          focusCoverage: String(componentRoot.userData.selectionFocusCoverage ?? ''),
+          focusTarget: String(componentRoot.userData.selectionFocusTarget ?? ''),
+          focusAnimation: String(componentRoot.userData.selectionFocusAnimation ?? ''),
+          selectionRequested: String(componentRoot.userData.selectionRequestedCount ?? 0),
+          outlineSelected: String(outlinePassRef.current?.selectedObjects.length ?? 0),
+          postureValid: String(componentRoot.userData.postureValidCount ?? 0),
+          postureInvalid: String(
+            (componentRoot.userData.postureInvalidDesignators as string[] | undefined)?.join(',') ?? '',
+          ),
+          contactValid: String(componentRoot.userData.contactValidCount ?? 0),
+          contactInvalid: String(
+            (componentRoot.userData.contactInvalidDesignators as string[] | undefined)?.join(',') ?? '',
+          ),
+          topPlacementRotations: placementMarkers
+            .filter((marker) => marker.userData.surfaceSide === 'top')
+            .map((marker) => `${marker.userData.designator}:${marker.userData.appliedPlacementRotation}`)
+            .join(','),
+          bottomPlacementRotations: placementMarkers
+            .filter((marker) => marker.userData.surfaceSide === 'bottom')
+            .map((marker) => `${marker.userData.designator}:${marker.userData.appliedPlacementRotation}`)
+            .join(','),
+          rotatedPlacements: String(
+            placementMarkers.filter((child) => child.userData.appliedRotationZ !== 0).length,
+          ),
+          flippedPlacements: String(
+            placementMarkers.filter((child) => child.userData.appliedRotationX !== 0).length,
+          ),
+          movedPlacements: String(movedMarkers.length),
+          placementOffsets: movedMarkers
+            .map((marker) => `${marker.userData.designator}:${marker.userData.appliedOffsetX},${marker.userData.appliedOffsetY},${marker.userData.appliedOffsetZ}`)
+            .join(','),
+        })
+      }
 
       const resize = () => {
         const width = Math.max(host.clientWidth, 1)
         const height = Math.max(host.clientHeight, 1)
         const pixelRatio = stableRenderPixelRatio(width, height)
         renderer.setPixelRatio(pixelRatio)
-        composer.setPixelRatio(pixelRatio)
         camera.aspect = width / height
         camera.updateProjectionMatrix()
         renderer.setSize(width, height, false)
-        composer.setSize(width, height)
+        const composer = composerRef.current
+        if (composer) {
+          composer.setPixelRatio(pixelRatio)
+          composer.setSize(width, height)
+        }
         const drawingBufferSize = renderer.getDrawingBufferSize(new THREE.Vector2())
         renderer.domElement.dataset.canvasClientSize = `${width}x${height}`
         renderer.domElement.dataset.drawingBufferSize = `${drawingBufferSize.x}x${drawingBufferSize.y}`
@@ -1670,141 +1879,28 @@ export default function PcbViewer({
       resize()
       setRenderError(null)
 
-      const cameraOffset = new THREE.Vector3()
+      let appliedSurfaceSide: SurfaceSide | null = null
       const animate = () => {
         if (contextLost) return
         controls.update()
-        grid.position.z = camera.position.z >= 0 ? -4 : 4
-        renderer.domElement.dataset.gridZ = String(grid.position.z)
-        renderer.domElement.dataset.gridVisible = String(grid.visible)
-        renderer.domElement.dataset.cameraPosition = camera.position.toArray()
-          .map((value) => value.toFixed(3))
-          .join(',')
-        renderer.domElement.dataset.cameraTarget = controls.target.toArray()
-          .map((value) => value.toFixed(3))
-          .join(',')
-        renderer.domElement.dataset.cameraDirection = cameraOffset
-          .copy(camera.position)
-          .sub(controls.target)
-          .normalize()
-          .toArray()
-          .map((value) => value.toFixed(5))
-          .join(',')
-        const boardRoot = boardRootRef.current
-        if (boardRoot) {
-          applyBoardVisibility(boardRoot, visibilityRef.current, camera.position.z)
-          const visibleSurfaceGroups = boardRoot.children.filter(
-            (child) => child.visible && child.userData.surfaceSide,
-          )
-          renderer.domElement.dataset.viewSide = camera.position.z >= 0 ? 'top' : 'bottom'
-          renderer.domElement.dataset.visibleTopGroups = String(
-            visibleSurfaceGroups.filter((child) => child.userData.surfaceSide === 'top').length,
-          )
-          renderer.domElement.dataset.visibleBottomGroups = String(
-            visibleSurfaceGroups.filter((child) => child.userData.surfaceSide === 'bottom').length,
-          )
+        const visibleSide: SurfaceSide = camera.position.z >= 0 ? 'top' : 'bottom'
+        if (visibleSide !== appliedSurfaceSide) {
+          appliedSurfaceSide = visibleSide
+          grid.position.z = visibleSide === 'top' ? -4 : 4
+          const boardRoot = boardRootRef.current
+          if (boardRoot) applyBoardVisibility(boardRoot, visibilityRef.current, camera.position.z)
+          const componentRoot = componentRootRef.current
+          if (componentRoot) {
+            applyComponentVisibility(componentRoot, visibilityRef.current.components, camera.position.z)
+          }
+          pixelCheckRequestedRef.current = true
         }
-        const componentRoot = componentRootRef.current
-        if (componentRoot) {
-          applyComponentVisibility(componentRoot, visibilityRef.current.components, camera.position.z)
-          const placementMarkers = componentRoot.children.filter((child) => child.userData.placementMarker)
-          renderer.domElement.dataset.cameraDistance = camera.position.distanceTo(controls.target).toFixed(3)
-          renderer.domElement.dataset.alignmentMode = String(componentRoot.userData.alignmentMode)
-          renderer.domElement.dataset.placementCount = String(componentRoot.userData.placementCount)
-          renderer.domElement.dataset.placementInside = String(componentRoot.userData.insideCount)
-          renderer.domElement.dataset.placementOutside = String(componentRoot.userData.outsideDesignators)
-          renderer.domElement.dataset.modelMatched = String(componentRoot.userData.modelMatchedCount)
-          renderer.domElement.dataset.modelLoaded = String(componentRoot.userData.modelLoadedCount)
-          renderer.domElement.dataset.modelFailed = String(componentRoot.userData.modelFailedCount)
-          renderer.domElement.dataset.visiblePlacements = String(
-            placementMarkers.filter((child) => child.visible).length,
-          )
-          renderer.domElement.dataset.selectedPlacements = String(
-            placementMarkers.filter((child) => child.userData.selected).length,
-          )
-          renderer.domElement.dataset.focusedPlacements = String(
-            componentRoot.userData.selectionFocusCount ?? 0,
-          )
-          renderer.domElement.dataset.focusDistance = String(
-            componentRoot.userData.selectionFocusDistance ?? '',
-          )
-          renderer.domElement.dataset.focusMargin = String(
-            componentRoot.userData.selectionFocusMargin ?? '',
-          )
-          renderer.domElement.dataset.focusCoverage = String(
-            componentRoot.userData.selectionFocusCoverage ?? '',
-          )
-          renderer.domElement.dataset.focusTarget = String(
-            componentRoot.userData.selectionFocusTarget ?? '',
-          )
-          renderer.domElement.dataset.focusAnimation = String(
-            componentRoot.userData.selectionFocusAnimation ?? '',
-          )
-          renderer.domElement.dataset.selectionRequested = String(
-            componentRoot.userData.selectionRequestedCount ?? 0,
-          )
-          renderer.domElement.dataset.outlineSelected = String(outlinePass.selectedObjects.length)
-          renderer.domElement.dataset.postureValid = String(componentRoot.userData.postureValidCount ?? 0)
-          renderer.domElement.dataset.postureInvalid = String(
-            (componentRoot.userData.postureInvalidDesignators as string[] | undefined)?.join(',') ?? '',
-          )
-          renderer.domElement.dataset.contactValid = String(componentRoot.userData.contactValidCount ?? 0)
-          renderer.domElement.dataset.contactInvalid = String(
-            (componentRoot.userData.contactInvalidDesignators as string[] | undefined)?.join(',') ?? '',
-          )
-          renderer.domElement.dataset.topPlacementRotations = placementMarkers
-            .filter((marker) => marker.userData.surfaceSide === 'top')
-            .map((marker) => `${marker.userData.designator}:${marker.userData.appliedPlacementRotation}`)
-            .join(',')
-          renderer.domElement.dataset.bottomPlacementRotations = placementMarkers
-            .filter((marker) => marker.userData.surfaceSide === 'bottom')
-            .map((marker) => `${marker.userData.designator}:${marker.userData.appliedPlacementRotation}`)
-            .join(',')
-          renderer.domElement.dataset.rotatedPlacements = String(
-            placementMarkers.filter((child) => child.userData.appliedRotationZ !== 0).length,
-          )
-          renderer.domElement.dataset.flippedPlacements = String(
-            placementMarkers.filter((child) => child.userData.appliedRotationX !== 0).length,
-          )
-          const movedMarkers = placementMarkers.filter((child) => (
-            child.userData.appliedOffsetX !== 0
-            || child.userData.appliedOffsetY !== 0
-            || child.userData.appliedOffsetZ !== 0
-          ))
-          renderer.domElement.dataset.movedPlacements = String(movedMarkers.length)
-          renderer.domElement.dataset.placementOffsets = movedMarkers
-            .map((marker) => `${marker.userData.designator}:${marker.userData.appliedOffsetX},${marker.userData.appliedOffsetY},${marker.userData.appliedOffsetZ}`)
-            .join(',')
-        } else {
-          renderer.domElement.dataset.placementCount = '0'
-          renderer.domElement.dataset.placementInside = '0'
-          renderer.domElement.dataset.modelMatched = '0'
-          renderer.domElement.dataset.modelLoaded = '0'
-          renderer.domElement.dataset.modelFailed = '0'
-          renderer.domElement.dataset.visiblePlacements = '0'
-          renderer.domElement.dataset.selectedPlacements = '0'
-          renderer.domElement.dataset.focusedPlacements = '0'
-          renderer.domElement.dataset.focusDistance = ''
-          renderer.domElement.dataset.focusMargin = ''
-          renderer.domElement.dataset.focusCoverage = ''
-          renderer.domElement.dataset.focusTarget = ''
-          renderer.domElement.dataset.focusAnimation = ''
-          renderer.domElement.dataset.selectionRequested = '0'
-          renderer.domElement.dataset.outlineSelected = '0'
-          renderer.domElement.dataset.postureValid = '0'
-          renderer.domElement.dataset.postureInvalid = ''
-          renderer.domElement.dataset.contactValid = '0'
-          renderer.domElement.dataset.contactInvalid = ''
-          renderer.domElement.dataset.topPlacementRotations = ''
-          renderer.domElement.dataset.bottomPlacementRotations = ''
-          renderer.domElement.dataset.rotatedPlacements = '0'
-          renderer.domElement.dataset.flippedPlacements = '0'
-          renderer.domElement.dataset.movedPlacements = '0'
-          renderer.domElement.dataset.placementOffsets = ''
-        }
+        if (pixelCheckRequestedRef.current) updateRendererDiagnostics()
         updateSelectionOverlay(camera, renderer.domElement)
         try {
-          composer.render()
+          const composer = composerRef.current
+          if (composer) composer.render()
+          else renderer.render(scene, camera)
         } catch (error) {
           recoverRenderer(error instanceof Error ? error.message : 'WebGL 渲染失败，正在重新初始化 3D 视图…')
           return
@@ -1817,24 +1913,10 @@ export default function PcbViewer({
             recoverRenderer('WebGL 图形上下文已丢失，正在重新初始化 3D 视图…')
             return
           }
-          const pixels = new Uint8Array(width * height * 4)
-          context.readPixels(0, 0, width, height, context.RGBA, context.UNSIGNED_BYTE, pixels)
-          const step = Math.max(1, Math.floor((width * height) / 24000))
-          const colors = new Set<number>()
-          let nonDark = 0
-          let samples = 0
-          for (let index = 0; index < width * height; index += step) {
-            const offset = index * 4
-            const red = pixels[offset]
-            const green = pixels[offset + 1]
-            const blue = pixels[offset + 2]
-            colors.add((Math.round(red / 16) << 8) | (Math.round(green / 16) << 4) | Math.round(blue / 16))
-            if (red + green + blue > 90) nonDark += 1
-            samples += 1
-          }
-          renderer.domElement.dataset.pixelSamples = String(samples)
-          renderer.domElement.dataset.pixelNonDark = String(nonDark)
-          renderer.domElement.dataset.pixelColors = String(colors.size)
+          // 只检查 WebGL 上下文和缓冲区可用性，避免整帧 readPixels 同步阻塞 GPU。
+          renderer.domElement.dataset.pixelSamples = '0'
+          renderer.domElement.dataset.pixelNonDark = ''
+          renderer.domElement.dataset.pixelColors = ''
           renderer.domElement.dataset.renderObjects = String(scene.children.length)
           renderer.domElement.dataset.pixelCheck = 'complete'
           pixelCheckRequestedRef.current = false
@@ -1857,15 +1939,14 @@ export default function PcbViewer({
         clearSelectionEffects()
         controls.removeEventListener('start', cancelFocusOnInteraction)
         controls.dispose()
-        outlinePass.dispose()
-        innerOutlinePass.dispose()
-        outputPass.dispose()
-        composer.dispose()
         renderer.dispose()
         renderer.domElement.remove()
         scene.clear()
-        outlinePassRef.current = null
-        innerOutlinePassRef.current = null
+        if (rendererRef.current === renderer) rendererRef.current = null
+        if (cameraRef.current === camera) cameraRef.current = null
+        if (sceneRef.current === scene) sceneRef.current = null
+        if (controlsRef.current === controls) controlsRef.current = null
+        if (gridRef.current === grid) gridRef.current = null
       }
     } catch (error) {
       setRenderError(error instanceof Error ? error.message : 'WebGL 初始化失败')
@@ -1898,6 +1979,9 @@ export default function PcbViewer({
       )
       scene.add(object)
       boardRootRef.current = object
+      if (cameraRef.current) {
+        applyBoardVisibility(object, visibilityRef.current, cameraRef.current.position.z)
+      }
       pixelCheckRequestedRef.current = true
       setRenderError(null)
     } catch (error) {

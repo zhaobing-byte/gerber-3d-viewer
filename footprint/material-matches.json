@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-09-22T01:59:38+00:00",
+  "updated_at": "2026-09-22T07:40:51+00:00",
   "matches": {
     "mat:c0402100nfk25v风华": "23020083",
     "mat:c0402100pfj50v三星": "23020010",
@@ -21,7 +21,7 @@
     "mat:p沟道30v4.2a": "25030037",
     "mat:res040220kb50ppm116w薄膜电阻厚声": "22020140",
     "mat:res120610mrf1wmillir毫欧": "22050005",
-    "mat:stm32armbased32bitmcuperformancelinewith512kbflash64kbinternalram40to85癈temperature64pinlqfptray": "21010058",
+    "mat:stm32armbased32bitmcuperformancelinewith512kbflash64kbinternalram40to85癈temperature64pinlqfptray": "21010070",
     "mat:sw轻触开关6x6x4.5mm4pin立贴国产编带": "28010040",
     "mat:usbtypecreceptacleforusb2.0smttypepcbtopmounttapeandreel": "27010012",
     "mat:usbtypec母头typec304jbcp165a有固定柱卧贴xunpu编带": "27010012",

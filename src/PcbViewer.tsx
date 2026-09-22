@@ -1126,6 +1126,8 @@ function createRasterizedLayers(
   color: THREE.ColorRepresentation,
   z: number,
   depth: number,
+  renderOrder: number,
+  writeDepth: boolean,
   maxAnisotropy: number,
   maxTextureSize: number,
   onTextureLoad: () => void,
@@ -1146,12 +1148,12 @@ function createRasterizedLayers(
     )
     const material = new THREE.MeshBasicMaterial({
       map: texture,
-      alphaTest: 0.02,
-      depthWrite: false,
-      polygonOffset: true,
-      polygonOffsetFactor: -2,
+      alphaTest: 0.01,
+      depthWrite: writeDepth,
+      polygonOffset: !writeDepth,
+      polygonOffsetFactor: writeDepth ? 0 : -2,
       side: THREE.DoubleSide,
-      transparent: true,
+      transparent: !writeDepth,
     })
     zPositions.forEach((surfaceZ) => {
       const mesh = new THREE.Mesh(geometry, material)
@@ -1160,7 +1162,7 @@ function createRasterizedLayers(
         (y1 + y2) / 2,
         surfaceZ + Math.sign(surfaceZ || 1) * layerIndex * 0.0005,
       )
-      mesh.renderOrder = 3
+      mesh.renderOrder = renderOrder
       mesh.userData.keepMaterial = true
       group.add(mesh)
     })
@@ -1503,10 +1505,14 @@ function buildBoardObject(
     depth: number,
     material: Partial<THREE.MeshStandardMaterialParameters> = {},
     underMask = false,
+    renderOrder = 0,
+    writeRasterDepth = true,
   ) => {
     if (layers.length === 0) return
-    const rasterize = kind === 'drill'
-      && layers.reduce((sum, layer) => sum + layer.image.children.length, 0) > RASTER_LAYER_THRESHOLD
+    const primitiveCount = layers.reduce((sum, layer) => sum + layer.image.children.length, 0)
+    // 大面积覆铜和密集阻焊开窗会生成大量共面的三角形；改用带 alpha cutout 的纹理平面，
+    // 既保留 Gerber 细节，也避免斜视角时的深度冲突。
+    const rasterize = primitiveCount > RASTER_LAYER_THRESHOLD
     const object = rasterize
       ? createRasterizedLayers(
           board,
@@ -1514,6 +1520,8 @@ function buildBoardObject(
           color,
           z,
           depth,
+          renderOrder,
+          writeRasterDepth,
           maxAnisotropy,
           maxTextureSize,
           onTextureLoad,
@@ -1537,31 +1545,31 @@ function buildBoardObject(
   addSurface(byRole('copper', 'top'), 'copper', copperColor, thickness / 2 + 0.031, 0.035, {
     roughness: 0.32,
     metalness: 0.62,
-  }, topMaskLayers.length > 0)
+  }, topMaskLayers.length > 0, 10)
   addSurface(byRole('copper', 'bottom'), 'copper', copperColor, -thickness / 2 - 0.031, 0.035, {
     roughness: 0.32,
     metalness: 0.62,
-  }, bottomMaskLayers.length > 0)
+  }, bottomMaskLayers.length > 0, 10)
   addSurface(topMaskLayers, 'copper', copperColor, thickness / 2 + 0.057, 0.014, {
     roughness: 0.3,
     metalness: 0.5,
-  })
+  }, false, 20)
   addSurface(bottomMaskLayers, 'copper', copperColor, -thickness / 2 - 0.057, 0.014, {
     roughness: 0.3,
     metalness: 0.5,
-  })
+  }, false, 20)
   addSurface(byRole('silkscreen', 'top'), 'silkscreen', silkColor, thickness / 2 + 0.071, 0.018, {
     roughness: 0.78,
     metalness: 0,
-  })
+  }, false, 30)
   addSurface(byRole('silkscreen', 'bottom'), 'silkscreen', silkColor, -thickness / 2 - 0.071, 0.018, {
     roughness: 0.78,
     metalness: 0,
-  })
+  }, false, 30)
   addSurface(byRole('drill'), 'drill', drillColor, 0, thickness + 0.22, {
     roughness: 1,
     metalness: 0,
-  })
+  }, false, 40, false)
 
   return root
 }

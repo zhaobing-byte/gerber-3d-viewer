@@ -626,8 +626,8 @@ function App() {
 
       // 清空搜索条件、待处理区收缩等变化会在本帧后重新排版，再校正一次避免行被表头或底部区域遮住。
       correctionFrame = requestAnimationFrame(() => {
-        const corrected = revealSelectedRow(selectedWrap)
-        if (corrected) corrected.row.focus({ preventScroll: true })
+        // 只校正滚动位置。这里不能把焦点交给行，否则会导致双击编辑器立刻 blur。
+        revealSelectedRow(selectedWrap)
       })
     })
     return () => {
@@ -1185,8 +1185,6 @@ function App() {
   }
 
   const startBomCellEdit = (item: BomItem, field: BomCellEdit['field']) => {
-    // 已勾选「确认」的行锁定内容：确认过的物料不该被再改掉，先取消勾选再编辑。
-    if (confirmedBomIds.has(item.id)) return
     setBomCellEdit({
       itemId: item.id,
       field,
@@ -1196,6 +1194,11 @@ function App() {
 
   const saveBomCellEdit = (edit: BomCellEdit) => {
     const value = edit.value.trim()
+    const item = bomData?.items.find((candidate) => candidate.id === edit.itemId)
+    const previousValue = item
+      ? (edit.field === 'materialName' ? item.materialName : item.value || item.partNumber)
+      : value
+    const changed = value !== previousValue
     setBomData((current) => current
       ? {
           ...current,
@@ -1207,6 +1210,15 @@ function App() {
           }),
         }
       : current)
+    if (changed) {
+      // 编辑后的内容需要重新核对，避免已确认状态覆盖更新过的数据。
+      setConfirmedBomIds((current) => {
+        if (!current.has(edit.itemId)) return current
+        const next = new Set(current)
+        next.delete(edit.itemId)
+        return next
+      })
+    }
     setBomCellEdit((current) => (
       current?.itemId === edit.itemId && current.field === edit.field ? null : current
     ))
@@ -1960,13 +1972,18 @@ function App() {
                           {item.sku || '—'}
                         </td>
                         <td
-                          className={`bom-name bom-editable-cell${isConfirmed ? ' locked' : ''}`}
+                          className="bom-name bom-editable-cell"
                           title={isConfirmed
-                            ? `${item.materialName}（已确认，取消勾选后可编辑）`
+                            ? `${item.materialName}（修改后将取消确认）`
                             : item.materialName}
+                          onMouseDown={(event) => {
+                            // 行本身可聚焦；阻止它在双击完成后抢走内联输入框焦点。
+                            if (!(event.target instanceof HTMLInputElement)) event.preventDefault()
+                          }}
                           onDoubleClick={(event) => {
+                            event.preventDefault()
                             event.stopPropagation()
-                            startBomCellEdit(item, 'materialName')
+                            requestAnimationFrame(() => startBomCellEdit(item, 'materialName'))
                           }}
                         >
                           {bomCellEdit?.itemId === item.id && bomCellEdit.field === 'materialName' ? (
@@ -1991,11 +2008,15 @@ function App() {
                           ) : item.materialName || '—'}
                         </td>
                         <td
-                          className={`bom-spec bom-editable-cell${isConfirmed ? ' locked' : ''}`}
-                          title={isConfirmed ? `${details}（已确认，取消勾选后可编辑）` : details}
+                          className="bom-spec bom-editable-cell"
+                          title={isConfirmed ? `${details}（修改后将取消确认）` : details}
+                          onMouseDown={(event) => {
+                            if (!(event.target instanceof HTMLInputElement)) event.preventDefault()
+                          }}
                           onDoubleClick={(event) => {
+                            event.preventDefault()
                             event.stopPropagation()
-                            startBomCellEdit(item, 'spec')
+                            requestAnimationFrame(() => startBomCellEdit(item, 'spec'))
                           }}
                         >
                           {bomCellEdit?.itemId === item.id && bomCellEdit.field === 'spec' ? (
@@ -2028,8 +2049,7 @@ function App() {
                         </td>
                         <td className="bom-quantity">{item.quantity}</td>
                         <td className="bom-actions">
-                          {/* 勾选「确认」后整行锁定：既不能改内容，也不能替换/删除。
-                              提示挂在这个容器上——禁用的 button 不会弹出自身 title。 */}
+                          {/* 勾选「确认」后锁定替换和删除；提示挂在容器上——禁用按钮不会弹出自身 title。 */}
                           <div
                             className="bom-action-buttons"
                             title={isConfirmed ? '已确认，取消勾选后可替换或删除元件' : undefined}

@@ -2870,11 +2870,6 @@ button {
   cursor: text;
 }
 
-/* 已勾选「确认」的行锁定内容编辑，避免确认过的物料被改掉。 */
-.bom-editable-cell.locked {
-  cursor: not-allowed;
-}
-
 .bom-inline-editor {
   display: block;
   width: 100%;

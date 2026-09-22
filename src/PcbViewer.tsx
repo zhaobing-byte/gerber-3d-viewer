@@ -55,13 +55,16 @@ interface PcbViewerProps {
   onClearSelection: () => void
 }
 
-type LayerKind = Exclude<keyof LayerVisibility, 'grid' | 'components'>
+type LayerKind = Exclude<keyof LayerVisibility, 'grid'>
+type GerberLayerKind = Exclude<LayerKind, 'components'>
 type SurfaceSide = 'top' | 'bottom'
 
 const copperColor = 0xd0a84f
 const silkColor = 0xf0eee6
 const drillColor = 0x090c0a
 const substrateColor = 0xd8ad4f
+const demoBoardWidth = 92
+const demoBoardHeight = 54
 const RASTER_LAYER_THRESHOLD = 500
 const FOOTPRINT_MODEL_SCALE = 1000
 const MAX_RENDER_PIXELS = 1_800_000
@@ -833,6 +836,194 @@ function createFallbackBoard(board: ParsedBoard, thickness: number): THREE.Group
   return group
 }
 
+function createDemoBoardShape() {
+  const width = demoBoardWidth
+  const height = demoBoardHeight
+  const radius = 4
+  const x1 = -width / 2
+  const y1 = -height / 2
+  const x2 = width / 2
+  const y2 = height / 2
+  const shape = new THREE.Shape()
+  shape.moveTo(x1 + radius, y1)
+  shape.lineTo(x2 - radius, y1)
+  shape.quadraticCurveTo(x2, y1, x2, y1 + radius)
+  shape.lineTo(x2, y2 - radius)
+  shape.quadraticCurveTo(x2, y2, x2 - radius, y2)
+  shape.lineTo(x1 + radius, y2)
+  shape.quadraticCurveTo(x1, y2, x1, y2 - radius)
+  shape.lineTo(x1, y1 + radius)
+  shape.quadraticCurveTo(x1, y1, x1 + radius, y1)
+  return shape
+}
+
+function createDemoBoardObject(thickness: number, maskColor: string): THREE.Group {
+  const root = new THREE.Group()
+  root.name = 'demo-pcb'
+  root.userData.demoBoard = true
+  const shape = createDemoBoardShape()
+
+  const bodyGeometry = new THREE.ExtrudeGeometry(shape, {
+    depth: 1,
+    bevelEnabled: false,
+  })
+  bodyGeometry.translate(0, 0, -0.5)
+  const body = new THREE.Mesh(bodyGeometry)
+  body.scale.z = thickness
+  replaceMaterial(body, substrateColor, {
+    depthWrite: true,
+    metalness: 0,
+    opacity: 1,
+    polygonOffset: false,
+    roughness: 0.68,
+    transparent: false,
+  })
+  setKind(body, 'board')
+  root.add(body)
+
+  const addMaskSurface = (side: SurfaceSide) => {
+    const mask = new THREE.Mesh(new THREE.ShapeGeometry(shape, 8))
+    mask.position.z = side === 'top' ? thickness / 2 + 0.018 : -thickness / 2 - 0.018
+    replaceMaterial(mask, maskColor, {
+      depthWrite: true,
+      emissive: maskColor,
+      emissiveIntensity: 0.42,
+      metalness: 0,
+      opacity: 1,
+      polygonOffset: false,
+      roughness: 0.38,
+      transparent: false,
+    })
+    setSurfaceSide(mask, side)
+    setKind(mask, 'mask')
+    root.add(mask)
+  }
+  addMaskSurface('top')
+  addMaskSurface('bottom')
+
+  const addCopperSurface = (side: SurfaceSide) => {
+    const copper = new THREE.Group()
+    const z = side === 'top' ? thickness / 2 + 0.05 : -thickness / 2 - 0.05
+    copper.position.z = z
+    const sign = side === 'top' ? 1 : -1
+
+    const addPad = (x: number, y: number, width: number, height: number) => {
+      const pad = new THREE.Mesh(new THREE.BoxGeometry(width, height, 0.035))
+      pad.position.set(x, y, 0)
+      copper.add(pad)
+    }
+    const addTrace = (x: number, y: number, width: number, height: number) => {
+      const trace = new THREE.Mesh(new THREE.BoxGeometry(width, height, 0.02))
+      trace.position.set(x, y, 0)
+      copper.add(trace)
+    }
+
+    const chipCenters: Array<[number, number, number, number]> = [
+      [-25, 12 * sign, 10, 7],
+      [0, 2 * sign, 15, 10],
+      [24, 13 * sign, 12, 8],
+      [23, -12 * sign, 11, 7],
+    ]
+    chipCenters.forEach(([x, y, width, height]) => {
+      addPad(x - width / 2 - 1.25, y, 1.6, height)
+      addPad(x + width / 2 + 1.25, y, 1.6, height)
+      addTrace(x, y + height / 2 + 2.5, width + 12, 0.8)
+      addTrace(x, y - height / 2 - 2.5, width + 12, 0.8)
+    })
+    for (let column = -4; column <= 4; column += 1) {
+      addPad(column * 7.5, -18 * sign, 3.8, 2.4)
+      addTrace(column * 7.5, -14 * sign, 0.7, 6.3)
+    }
+    for (let index = 0; index < 9; index += 1) {
+      addPad(-36 + index * 4.5, -4 * sign, 2.1, 1.4)
+    }
+    for (const [x, y] of [[-35, 20], [35, 20], [-35, -20], [35, -20]] as Array<[number, number]>) {
+      const via = new THREE.Mesh(new THREE.RingGeometry(0.7, 1.4, 20))
+      via.position.set(x, y, 0.025)
+      copper.add(via)
+    }
+
+    replaceMaterial(copper, copperColor, {
+      depthWrite: true,
+      metalness: 0.58,
+      polygonOffset: false,
+      roughness: 0.3,
+    })
+    setSurfaceSide(copper, side)
+    setKind(copper, 'copper')
+    root.add(copper)
+  }
+  addCopperSurface('top')
+  addCopperSurface('bottom')
+
+  const silkscreen = new THREE.Group()
+  silkscreen.position.z = thickness / 2 + 0.075
+  const addSilkLine = (x: number, y: number, width: number, height: number) => {
+    const line = new THREE.Mesh(new THREE.BoxGeometry(width, height, 0.018))
+    line.position.set(x, y, 0)
+    silkscreen.add(line)
+  }
+  addSilkLine(0, 22, 62, 0.7)
+  addSilkLine(0, -22, 62, 0.7)
+  addSilkLine(-31, 0, 0.7, 17)
+  addSilkLine(31, 0, 0.7, 17)
+  addSilkLine(-13, 15, 11, 0.5)
+  addSilkLine(13, 15, 11, 0.5)
+  replaceMaterial(silkscreen, silkColor, {
+    depthWrite: true,
+    metalness: 0,
+    polygonOffset: false,
+    roughness: 0.78,
+  })
+  setSurfaceSide(silkscreen, 'top')
+  setKind(silkscreen, 'silkscreen')
+  root.add(silkscreen)
+
+  const drill = new THREE.Group()
+  drill.position.z = thickness / 2 + 0.09
+  for (const [x, y] of [[-41, 21], [41, 21], [-41, -21], [41, -21]] as Array<[number, number]>) {
+    const hole = new THREE.Mesh(new THREE.CircleGeometry(2.1, 28))
+    hole.position.set(x, y, 0)
+    drill.add(hole)
+  }
+  replaceMaterial(drill, drillColor, {
+    depthWrite: true,
+    metalness: 0,
+    polygonOffset: false,
+    roughness: 1,
+  })
+  setSurfaceSide(drill, 'top')
+  setKind(drill, 'drill')
+  root.add(drill)
+
+  const components = new THREE.Group()
+  components.position.z = thickness / 2 + 0.17
+  for (const [x, y, width, height, depth] of [
+    [-25, 12, 9, 6, 1.2],
+    [0, 2, 14, 9, 1.6],
+    [24, 13, 11, 7, 1.3],
+    [23, -12, 10, 6, 1.1],
+    [-20, -16, 5, 3, 0.8],
+    [-12, -16, 5, 3, 0.8],
+    [-4, -16, 5, 3, 0.8],
+  ] as Array<[number, number, number, number, number]>) {
+    const component = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth))
+    component.position.set(x, y, depth / 2)
+    components.add(component)
+  }
+  replaceMaterial(components, 0x202724, {
+    depthWrite: true,
+    metalness: 0.08,
+    polygonOffset: false,
+    roughness: 0.48,
+  })
+  setSurfaceSide(components, 'top')
+  setKind(components, 'components')
+  root.add(components)
+
+  return root
+}
+
 interface SvgNodeLike {
   type: string
   tagName?: string
@@ -1306,7 +1497,7 @@ function buildBoardObject(
 
   const addSurface = (
     layers: ParsedLayer[],
-    kind: LayerKind,
+    kind: GerberLayerKind,
     color: number,
     z: number,
     depth: number,
@@ -2071,22 +2262,24 @@ export default function PcbViewer({
       disposeObject(boardRootRef.current)
       boardRootRef.current = null
     }
-    if (!board) return
-
     try {
-      const renderer = rendererRef.current
-      const maxAnisotropy = renderer?.capabilities.getMaxAnisotropy() ?? 4
-      const maxTextureSize = renderer?.capabilities.maxTextureSize ?? 4096
-      const object = buildBoardObject(
-        board,
-        thickness,
-        boardColor,
-        maxAnisotropy,
-        maxTextureSize,
-        () => {
-        pixelCheckRequestedRef.current = true
-        },
-      )
+      const object = board
+        ? (() => {
+            const renderer = rendererRef.current
+            const maxAnisotropy = renderer?.capabilities.getMaxAnisotropy() ?? 4
+            const maxTextureSize = renderer?.capabilities.maxTextureSize ?? 4096
+            return buildBoardObject(
+              board,
+              thickness,
+              boardColor,
+              maxAnisotropy,
+              maxTextureSize,
+              () => {
+                pixelCheckRequestedRef.current = true
+              },
+            )
+          })()
+        : createDemoBoardObject(thickness, boardColor)
       scene.add(object)
       boardRootRef.current = object
       if (cameraRef.current) {
@@ -2196,11 +2389,13 @@ export default function PcbViewer({
   useEffect(() => {
     const camera = cameraRef.current
     const controls = controlsRef.current
-    if (!camera || !controls || !board) return
+    if (!camera || !controls) return
     cancelCameraFocusAnimation()
+    const boardWidth = board?.widthMm ?? demoBoardWidth
+    const boardHeight = board?.heightMm ?? demoBoardHeight
     const halfFov = THREE.MathUtils.degToRad(camera.fov / 2)
-    const fitHeight = board.heightMm / (2 * Math.tan(halfFov))
-    const fitWidth = board.widthMm / (2 * Math.tan(halfFov) * Math.max(camera.aspect, 0.1))
+    const fitHeight = boardHeight / (2 * Math.tan(halfFov))
+    const fitWidth = boardWidth / (2 * Math.tan(halfFov) * Math.max(camera.aspect, 0.1))
     const distance = Math.max(Math.max(fitHeight, fitWidth) * (cameraPreset === 'iso' ? 1.55 : 1.2), 48)
 
     if (cameraPreset === 'top') {

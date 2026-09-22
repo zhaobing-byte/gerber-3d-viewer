@@ -246,7 +246,7 @@ const libraryTableColumns: LibraryColumnDefinition[] = [
   { key: 'name', label: '名称', defaultWidth: 480, minWidth: 180, maxWidth: 820 },
   { key: 'dataStatus', label: '数据状态', defaultWidth: 150, minWidth: 84, maxWidth: 320 },
   { key: 'disabledStatus', label: '禁用状态', defaultWidth: 150, minWidth: 84, maxWidth: 320 },
-  { key: 'unit', label: '单位', defaultWidth: 110, minWidth: 64, maxWidth: 220 },
+  { key: 'unit', label: '3D封装匹配情况', defaultWidth: 170, minWidth: 144, maxWidth: 320 },
   { key: 'model', label: '3D封装', defaultWidth: 220, minWidth: 210, maxWidth: 320 },
 ]
 

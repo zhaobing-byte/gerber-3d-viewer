@@ -2167,7 +2167,7 @@ button {
   justify-content: space-between;
   padding: 0 7px;
   color: #849088;
-  font-size: 9px;
+  font-size: 13px;
   font-weight: 700;
 }
 
@@ -2189,7 +2189,7 @@ button {
   border-left: 2px solid transparent;
   color: #9da8a0;
   background: transparent;
-  font-size: 10px;
+  font-size: 14px;
   text-align: left;
   cursor: pointer;
 }
@@ -2202,7 +2202,7 @@ button {
 
 .library-field-nav button strong {
   color: #6f7c74;
-  font-size: 9px;
+  font-size: 13px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }

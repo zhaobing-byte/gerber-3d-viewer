@@ -2654,7 +2654,7 @@ button {
 
 .bom-table-wrap.pending-bom-table-wrap {
   max-height: 190px;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
   border-top: 1px solid #303934;
   background: #151a17;
 }
@@ -2683,6 +2683,10 @@ button {
   overflow: auto;
   scrollbar-color: #48544c transparent;
   scrollbar-width: thin;
+}
+
+.checking-bom-table-wrap {
+  min-height: 136px;
 }
 
 .bom-table {

@@ -589,6 +589,7 @@ function App() {
 
   useEffect(() => {
     if (!selectedBomId) return
+    let correctionFrame: number | null = null
     const frame = requestAnimationFrame(() => {
       const revealSelectedRow = (wrap: HTMLDivElement | null) => {
         if (!wrap) return false
@@ -599,23 +600,39 @@ function App() {
         // 用屏幕坐标而不是 table 内的 offsetTop，避免 sticky 表头和两个独立滚动表导致定位偏差。
         const wrapBounds = wrap.getBoundingClientRect()
         const headerBottom = wrap.querySelector('thead')?.getBoundingClientRect().bottom ?? wrapBounds.top
-        const visibleTop = Math.min(wrapBounds.bottom, Math.max(wrapBounds.top, headerBottom))
-        const visibleBottom = wrapBounds.bottom
+        const margin = 12
+        const visibleTop = Math.min(wrapBounds.bottom, Math.max(wrapBounds.top, headerBottom)) + margin
+        const visibleBottom = wrapBounds.bottom - margin
         const rowBounds = row.getBoundingClientRect()
-        const margin = 8
-        if (rowBounds.top < visibleTop + margin) {
-          wrap.scrollTop += rowBounds.top - visibleTop - margin
-        } else if (rowBounds.bottom > visibleBottom - margin) {
-          wrap.scrollTop += rowBounds.bottom - visibleBottom + margin
+        if (visibleBottom <= visibleTop) return { row, wrap }
+
+        if (rowBounds.top < visibleTop || rowBounds.bottom > visibleBottom) {
+          const visibleHeight = visibleBottom - visibleTop
+          const rowHeight = rowBounds.height
+          const offset = visibleHeight >= rowHeight + margin * 2
+            ? (rowBounds.top + rowBounds.bottom) / 2 - (visibleTop + visibleBottom) / 2
+            : rowBounds.top - visibleTop
+          wrap.scrollTop += offset
         }
-        row.focus({ preventScroll: true })
-        return true
+        return { row, wrap }
       }
 
       // 一个 BOM 行只会属于其中一张表；先匹配主表，再匹配待处理表。
-      revealSelectedRow(bomTableWrapRef.current) || revealSelectedRow(pendingBomTableWrapRef.current)
+      const revealed = revealSelectedRow(bomTableWrapRef.current)
+        || revealSelectedRow(pendingBomTableWrapRef.current)
+      if (!revealed) return
+      const selectedWrap = revealed.wrap
+
+      // 清空搜索条件、待处理区收缩等变化会在本帧后重新排版，再校正一次避免行被表头或底部区域遮住。
+      correctionFrame = requestAnimationFrame(() => {
+        const corrected = revealSelectedRow(selectedWrap)
+        if (corrected) corrected.row.focus({ preventScroll: true })
+      })
     })
-    return () => cancelAnimationFrame(frame)
+    return () => {
+      cancelAnimationFrame(frame)
+      if (correctionFrame !== null) cancelAnimationFrame(correctionFrame)
+    }
   }, [selectedBomId, bomQuery, bomSelectionRevision])
 
   const reconcileBomWithLibrary = (
@@ -1847,7 +1864,7 @@ function App() {
             <div className="bom-table-section-label checking">核对元件</div>
 
             <div
-              className={`bom-table-wrap ${resizingBomColumn ? 'resizing-columns' : ''}`}
+              className={`bom-table-wrap checking-bom-table-wrap ${resizingBomColumn ? 'resizing-columns' : ''}`}
               ref={bomTableWrapRef}
             >
               <table className="bom-table" style={{ width: bomTableWidth }}>

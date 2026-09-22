@@ -369,6 +369,7 @@ function saveStringMap(storageKey: string, entries: StringMap) {
 function App() {
   const gerberInputRef = useRef<HTMLInputElement>(null)
   const bomInputRef = useRef<HTMLInputElement>(null)
+  const allBomConfirmationRef = useRef<HTMLInputElement>(null)
   const bomTableWrapRef = useRef<HTMLDivElement | null>(null)
   const pendingBomTableWrapRef = useRef<HTMLDivElement | null>(null)
   const placementInputRef = useRef<HTMLInputElement>(null)
@@ -905,6 +906,10 @@ function App() {
     [bomData, confirmedBomIds],
   )
   const confirmedBomCount = confirmedBomItems.length
+  const currentBomItems = bomData?.items ?? []
+  const allBomItemsConfirmed = currentBomItems.length > 0
+    && currentBomItems.every((item) => confirmedBomIds.has(item.id))
+  const someBomItemsConfirmed = confirmedBomCount > 0 && !allBomItemsConfirmed
   const bomTableWidth = useMemo(
     () => bomTableColumns.reduce((total, column) => total + bomColumnWidths[column.key], 0),
     [bomColumnWidths],
@@ -1028,6 +1033,27 @@ function App() {
       return next
     })
   }
+
+  const toggleAllBomConfirmations = () => {
+    const items = bomData?.items ?? []
+    if (items.length === 0) return
+    setBomCellEdit(null)
+    setConfirmedBomIds((current) => {
+      const allConfirmed = items.every((item) => current.has(item.id))
+      const next = new Set(current)
+      for (const item of items) {
+        if (allConfirmed) next.delete(item.id)
+        else next.add(item.id)
+      }
+      return next
+    })
+  }
+
+  useEffect(() => {
+    if (allBomConfirmationRef.current) {
+      allBomConfirmationRef.current.indeterminate = someBomItemsConfirmed
+    }
+  }, [someBomItemsConfirmed])
 
   const exportProductionBom = async () => {
     if (confirmedBomItems.length === 0) {
@@ -1378,7 +1404,7 @@ function App() {
     </colgroup>
   )
 
-  const renderBomTableHeader = () => (
+  const renderBomTableHeader = (showSelectAll = false) => (
     <thead>
       <tr>
         {bomTableColumns.map((column) => (
@@ -1387,7 +1413,18 @@ function App() {
             key={column.key}
             aria-label={column.key === 'check' ? column.label : undefined}
           >
-            {column.key !== 'check' && column.label}
+            {column.key === 'check'
+              ? showSelectAll && (
+                <input
+                  ref={allBomConfirmationRef}
+                  type="checkbox"
+                  checked={allBomItemsConfirmed}
+                  onChange={toggleAllBomConfirmations}
+                  aria-label="全选元件核对"
+                  title={allBomItemsConfirmed ? '取消全选元件核对' : '全选元件核对'}
+                />
+              )
+              : column.label}
             <span
               aria-label={`调整${column.label}列宽`}
               aria-orientation="vertical"
@@ -1869,7 +1906,7 @@ function App() {
             >
               <table className="bom-table" style={{ width: bomTableWidth }}>
                 {renderBomColumnGroup()}
-                {renderBomTableHeader()}
+                {renderBomTableHeader(true)}
                 <tbody>
                   {filteredBomItems.map((item) => {
                     const isConfirmed = confirmedBomIds.has(item.id)

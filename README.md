@@ -72,6 +72,37 @@ npm run preview
 
 金蝶配置保存在 `server/config.json`。该文件已被 Git 忽略，API 也只向浏览器返回是否已保存密钥，不会返回 AppSecret 本身。
 
+## 局域网部署
+
+在作为服务器的电脑上双击 [start-lan-server.cmd](scripts/start-lan-server.cmd)，接受 Windows 管理员权限提示。脚本会自动执行生产构建、识别默认网卡的 IPv4 地址、更新仅允许当前局域网网段访问的防火墙规则，并在后台启动 FABVIEW 服务。
+
+重启电脑后再次运行同一个脚本即可。控制台会打印同事应使用的访问地址，例如 `http://192.168.123.137:4173/`。也可以从项目根目录运行：
+
+```powershell
+npm run deploy:lan
+```
+
+默认允许与服务器同一子网的设备访问。需要指定网段或跳过本次构建时，可运行：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-lan-server.ps1 -AllowedSubnet '192.168.123.0/24'
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-lan-server.ps1 -SkipBuild
+```
+
+停止部署时，双击 [stop-lan-server.cmd](scripts/stop-lan-server.cmd)，或运行：
+
+```powershell
+npm run stop:lan
+```
+
+停止脚本只会关闭监听端口的 `kingdee_server.py`，并删除 `FABVIEW LAN 4173` 防火墙规则。若计划很快再次部署并希望保留规则，可运行：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\stop-lan-server.ps1 -KeepFirewallRule
+```
+
+服务器需要保持开机且不能休眠。`server/config.json`、`footprint/3dmodels` 和 `footprint` 下的匹配记录均由服务器共享；该部署不包含登录鉴权，仅应在可信局域网中使用，不能将端口映射到公网。
+
 ## 推荐使用流程
 
 1. 点击“金蝶 ERP”，填写连接信息并测试登录。

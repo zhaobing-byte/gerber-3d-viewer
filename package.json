@@ -9,6 +9,8 @@
     "build": "tsc --noEmit -p tsconfig.app.json && tsc --noEmit -p tsconfig.node.json && vite build",
     "models:import": "python scripts/extract-3dmodels-archive.py",
     "models:convert": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/convert-step-models.ps1",
+    "deploy:lan": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/start-lan-server.ps1",
+    "stop:lan": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/stop-lan-server.ps1",
     "preview": "python server/kingdee_server.py --port 4173",
     "test:server": "python -m unittest discover -s server -p test_*.py -v"
   },
